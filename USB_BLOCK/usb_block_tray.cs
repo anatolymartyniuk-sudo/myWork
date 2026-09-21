@@ -176,12 +176,57 @@ namespace UsbBlockTray
 
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
+
+                // Гарантируем работу уведомителя в текущей сессии. Если
+                // задача "USB_Block_Notify_Logon" отсутствует (программа
+                // установлена версией до её появления), уведомления не
+                // запускались бы вовсе - трей подстрахует и запустит
+                // уведомитель отдельным процессом.
+                StartNotifier();
+
                 using (TrayContext ctx = new TrayContext())
                 {
                     Application.Run(ctx);
                 }
             }
             return 0;
+        }
+
+        // Запускает отдельный процесс-уведомитель (--notify) в текущей
+        // сессии, если он ещё не работает. Уведомитель живёт независимо от
+        // трея, поэтому "Выход" из трея его не останавливает; повторные
+        // запуски отсекает мьютекс уведомителя.
+        public static void StartNotifier()
+        {
+            try
+            {
+                bool exists = false;
+                try
+                {
+                    using (Mutex m = Mutex.OpenExisting(NotifyMutexName))
+                    {
+                        exists = true;
+                    }
+                }
+                catch (WaitHandleCannotBeOpenedException)
+                {
+                    exists = false;
+                }
+                catch
+                {
+                    exists = false;
+                }
+                if (exists) return;
+
+                ProcessStartInfo psi = new ProcessStartInfo(
+                    Application.ExecutablePath, "--notify");
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                Process.Start(psi);
+            }
+            catch
+            {
+            }
         }
 
         public static bool IsAdministrator()
@@ -2429,14 +2474,24 @@ namespace UsbBlockTray
 
         public static bool IsInstalled()
         {
+            return TaskInstalled(TaskName);
+        }
+
+        public static bool NotifyInstalled()
+        {
+            return TaskInstalled(NotifyTaskName);
+        }
+
+        private static bool TaskInstalled(string name)
+        {
             try
             {
-                return TaskExists(TaskName);
+                return TaskExists(name);
             }
             catch
             {
                 string o;
-                return Exec.Run("schtasks.exe", "/Query /TN \"" + TaskName + "\"", out o);
+                return Exec.Run("schtasks.exe", "/Query /TN \"" + name + "\"", out o);
             }
         }
 
@@ -3977,6 +4032,13 @@ namespace UsbBlockTray
                 "  существует=" + File.Exists(ProtectedCopy.InstallExe));
             sb.AppendLine("Служба мониторинга: " +
                 (ServiceManager.IsInstalled() ? "установлена" : "не установлена"));
+            sb.AppendLine("Задача трея (--logon): " +
+                (TrayTask.IsInstalled() ? "есть" : "нет"));
+            sb.AppendLine("Задача уведомителя (--notify): " +
+                (TrayTask.NotifyInstalled() ? "есть" : "нет"));
+            sb.AppendLine("Процесс-уведомитель: " +
+                (NotifyRunning() ? "работает" : "не найден"));
+            sb.AppendLine("Событие блокировки (очередь): " + EventsSummary());
 
             sb.AppendLine();
             sb.AppendLine("--- Политика ---");
@@ -4070,6 +4132,50 @@ namespace UsbBlockTray
             string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "diag.log");
             File.WriteAllText(path, sb.ToString(), new UTF8Encoding(true));
             return 0;
+        }
+
+        // Работает ли сейчас отдельный процесс-уведомитель (--notify) в
+        // текущей сессии (по командной строке процессов этого пользователя).
+        private static bool NotifyRunning()
+        {
+            try
+            {
+                using (ManagementObjectSearcher s = new ManagementObjectSearcher(
+                    "SELECT CommandLine FROM Win32_Process WHERE Name='usb_block_tray.exe'"))
+                {
+                    foreach (ManagementBaseObject o in s.Get())
+                    {
+                        string cl = o["CommandLine"] as string;
+                        if (cl != null && cl.IndexOf("--notify",
+                            StringComparison.OrdinalIgnoreCase) >= 0)
+                            return true;
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return false;
+        }
+
+        // Краткая сводка очереди событий (HKLM\SOFTWARE\USB_Block\Events) и
+        // последнего показанного события (HKCU).
+        private static string EventsSummary()
+        {
+            try
+            {
+                List<NotifyStore.BlockEvent> evs = NotifyStore.ReadAll();
+                long last = NotifyStore.GetLastSeen();
+                long max = 0;
+                foreach (NotifyStore.BlockEvent e in evs)
+                    if (e.Id > max) max = e.Id;
+                return "записей=" + evs.Count + ", макс.id=" + max +
+                    ", LastEventId(HKCU)=" + last;
+            }
+            catch (Exception ex)
+            {
+                return "ошибка чтения: " + ex.Message;
+            }
         }
     }
 
