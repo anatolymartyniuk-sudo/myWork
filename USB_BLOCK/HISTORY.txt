@@ -915,3 +915,53 @@ Highest, при входе в систему запускаются службо
   перезагрузки, уведомления, ограничение управления) выполняет
   пользователь: установить службу (меню 7), перезагрузиться, войти под
   разными пользователями.
+
+--------------------------------------------------
+ЭТАП 46. ИСПРАВЛЕНИЕ: schtasks "The task XML contains a value which is
+         incorrectly formatted or out of range" (задача значков в трее)
+--------------------------------------------------
+Запрос пользователя: служба установилась, но задача Планировщика
+"USB_Block_Tray_Logon" НЕ создалась - schtasks вернул "The task XML
+contains a value which is incorrectly formatted or out of range". Значка в
+трее нет после перезагрузки ни у кого, уведомлений тоже никто не получает
+(трей просто не запускается - уведомления идёт через него).
+
+ПРИЧИНА (найдена и воспроизведена локально):
+- Неверное значение <RunLevel> в XML задачи: было "Highest". В XML-схеме
+  Task Scheduler (runLevelType simple type) допустимы ТОЛЬКО значения
+  "LeastPrivilege" и "HighestAvailable". Имена "Limited"/"Highest" - это
+  значения перечисления PowerShell (New-ScheduledTaskPrincipal -RunLevel)
+  и целочисленных констант TASK_RUNLEVEL_*, они НЕ валидны в XML.
+  schtasks при этом выдаёт ровно "out of range" (позиция ошибки указывает
+  на элемент <RunLevel>).
+- Воспроизведено тестом через COM (Schedule.Service):
+  * <RunLevel>Limited</RunLevel> или <RunLevel>Highest</RunLevel> ->
+    ошибка валидации с позицией (..):RunLevel:...;
+  * <RunLevel>LeastPrivilege</RunLevel> -> задача регистрируется;
+  * <RunLevel>HighestAvailable</RunLevel> + GroupId + LogonTrigger +
+    полные Settings -> единственная ошибка у не-администратора - обычный
+    "Отказано в доступе" (0x80070005), т.е. XML валиден, не хватает прав
+    (для администратора право есть, задача создастся).
+- Кодировка файла XML (UTF-16 LE с BOM) - корректна: schtasks принимает
+  UTF-16LE и ANSI.
+
+Исправление в usb_block_tray.cs (TrayTask.BuildXml):
+  <RunLevel>Highest</RunLevel>  ->  <RunLevel>HighestAvailable</RunLevel>
+
+Прочие проблемы после этого уходят сами: задача создаётся -> после
+перезагрузки у каждого пользователя запускается трей (--logon) -> он
+читает очередь HKLM\SOFTWARE\USB_Block\Events и показывает уведомления.
+
+Проверено:
+- csc (Framework 64 v4.0.30319, winexe, -win32icon) без ошибок;
+- exe пересобран, трейлер USBICON на месте;
+- --selftest: 7/7 OK;
+- валидность XML подтверждена регистрацией-тестом (COM RegisterTask):
+  XML с GroupId + HighestAvailable + LogonTrigger + полными Settings
+  проходит проверку схемы.
+- Пользователю: в меню НАСТРОИТЬ ЗАДАЧУ ЗАНОВО. Если задача не была
+  создана вообще - простая установка службы (меню 7) не пересоздаст её,
+  т.к. служба уже стоит; сначала меню 8 "Удалить службу мониторинга",
+  затем меню 7 "Установить службу мониторинга" (создастся и служба, и
+  задача). После этого - перезагрузка и проверка значков/уведомлений у
+  всех пользователей.

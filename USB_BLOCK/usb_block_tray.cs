@@ -2401,6 +2401,11 @@ namespace UsbBlockTray
             // любого пользователя, с его токеном и наивысшим доступным уровнем
             // прав (администраторы - молча с полным токеном, остальные - без
             // прав, без запроса пароля).
+            // ВАЖНО: в XML-схеме Task Scheduler значения RunLevel - только
+            // "LeastPrivilege"/"HighestAvailable" (а НЕ "Limited"/"Highest",
+            // которые использует PowerShell). "Highest" даёт у schtasks ошибку
+            // "The task XML contains a value which is incorrectly formatted or
+            // out of range" - воспроизведено и проверено тестом регистрации.
             string command = "\"" + ProtectedCopy.InstallExe + "\"";
             return
                 "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n" +
@@ -2416,7 +2421,7 @@ namespace UsbBlockTray
                 "  <Principals>\r\n" +
                 "    <Principal id=\"Author\">\r\n" +
                 "      <GroupId>S-1-5-32-545</GroupId>\r\n" +
-                "      <RunLevel>Highest</RunLevel>\r\n" +
+                "      <RunLevel>HighestAvailable</RunLevel>\r\n" +
                 "    </Principal>\r\n" +
                 "  </Principals>\r\n" +
                 "  <Settings>\r\n" +
