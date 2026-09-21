@@ -7,6 +7,7 @@ using System.Globalization;
 using System.IO;
 using System.Management;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
@@ -309,7 +310,40 @@ namespace UsbBlockTray
             try
             {
                 Directory.CreateDirectory(dir);
-                File.Copy(Application.ExecutablePath, exePath, true);
+
+                // Уже запущены из защищённой копии - обновлять нечего.
+                if (string.Equals(Path.GetFullPath(Application.ExecutablePath),
+                        Path.GetFullPath(exePath), StringComparison.OrdinalIgnoreCase))
+                    return null;
+
+                try
+                {
+                    File.Copy(Application.ExecutablePath, exePath, true);
+                }
+                catch (IOException)
+                {
+                    // Защищённая копия сейчас ЗАПУЩЕНА (трей/уведомитель/служба
+                    // стартуют именно из неё), поэтому перезаписать файл нельзя.
+                    // Windows не даёт перезаписать работающий exe, но разрешает
+                    // его ПЕРЕИМЕНОВАТЬ: уводим старую копию в сторону, кладём
+                    // на её место новую, а старую удаляем при перезагрузке.
+                    string old = exePath + ".old_" +
+                        Guid.NewGuid().ToString("N").Substring(0, 8);
+                    File.Move(exePath, old);
+                    try
+                    {
+                        File.Copy(Application.ExecutablePath, exePath, false);
+                    }
+                    catch
+                    {
+                        // не удалось положить новую копию - вернём старую назад
+                        try { File.Move(old, exePath); }
+                        catch { }
+                        throw;
+                    }
+                    ScheduleDeleteOnReboot(old);
+                }
+
                 RestrictDirectoryAcl(dir);
                 return null;
             }
@@ -317,6 +351,22 @@ namespace UsbBlockTray
             {
                 return ex.Message;
             }
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool MoveFileEx(string existingFileName,
+            string newFileName, int flags);
+
+        private const int MOVEFILE_DELAY_UNTIL_REBOOT = 0x4;
+
+        // Удаляет отложенный файл: сначала пробует сразу, а если он ещё занят
+        // (работающий exe) - ставит удаление в очередь до перезагрузки.
+        private static void ScheduleDeleteOnReboot(string path)
+        {
+            try { File.Delete(path); return; }
+            catch { }
+            try { MoveFileEx(path, null, MOVEFILE_DELAY_UNTIL_REBOOT); }
+            catch { }
         }
 
         private static void RestrictDirectoryAcl(string dir)
