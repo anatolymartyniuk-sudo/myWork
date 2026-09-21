@@ -667,6 +667,8 @@ namespace UsbBlockTray
         public List<string> HardwareIds = new List<string>();
         public string BestDiskId;   // конкретный HardwareID диска
         public string DiskDeviceId; // \\.\PHYSICALDRIVE<n>
+        public string Label;        // метка (имя) тома накопителя
+        public bool Allowed;        // true - устройство в whitelist (сейчас разрешено)
     }
 
     public sealed class BlockedDevice
@@ -2059,6 +2061,10 @@ namespace UsbBlockTray
             this.ClientSize = new Size(540, 340);
             this.Font = new Font("Segoe UI", 9f);
 
+            // Какое устройство уже разрешено (в whitelist) - зелёное,
+            // остальные (будут/были заблокированы) - красные.
+            MarkAllowed();
+
             Label lblSel = new Label();
             lblSel.Text = "Выберите USB-накопитель:";
             lblSel.AutoSize = true;
@@ -2066,14 +2072,18 @@ namespace UsbBlockTray
 
             _cbDevice = new System.Windows.Forms.ComboBox();
             _cbDevice.DropDownStyle = ComboBoxStyle.DropDownList;
+            _cbDevice.DrawMode = DrawMode.OwnerDrawFixed;
             _cbDevice.SetBounds(12, 32, 516, 24);
             foreach (StorageDevice sd in _devices)
             {
+                // Метка тома перед названием модели; DEV ID и SN в списке
+                // больше не показываются.
                 string label = string.IsNullOrEmpty(sd.Model) ? "(без имени)" : sd.Model;
-                if (!string.IsNullOrEmpty(sd.UsbId)) label += "   [" + sd.UsbId + "]";
-                if (!string.IsNullOrEmpty(sd.Serial)) label += "   SN=" + sd.Serial;
+                if (!string.IsNullOrEmpty(sd.Label))
+                    label = sd.Label + "  " + label;
                 _cbDevice.Items.Add(label);
             }
+            _cbDevice.DrawItem += DrawDeviceItem;
             _cbDevice.SelectedIndexChanged += delegate { OnSelection(); };
 
             Label lblName = new Label();
@@ -2133,6 +2143,45 @@ namespace UsbBlockTray
                 _cbDevice.SelectedIndex = 0;
         }
 
+        // Устройства из whitelist (разрешённые) - зелёным, остальные
+        // (блокируемые/заблокированные) - красным.
+        private void MarkAllowed()
+        {
+            HashSet<string> wl = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                foreach (DeviceEntry x in UsbMonitor.GetWhitelist())
+                {
+                    if (!string.IsNullOrEmpty(x.Serial)) wl.Add("SN:" + x.Serial);
+                    if (!string.IsNullOrEmpty(x.UsbId)) wl.Add("USB:" + x.UsbId);
+                }
+            }
+            catch
+            {
+            }
+            foreach (StorageDevice sd in _devices)
+            {
+                sd.Allowed =
+                    (!string.IsNullOrEmpty(sd.Serial) && wl.Contains("SN:" + sd.Serial)) ||
+                    (!string.IsNullOrEmpty(sd.UsbId) && wl.Contains("USB:" + sd.UsbId));
+            }
+        }
+
+        private void DrawDeviceItem(object sender, DrawItemEventArgs e)
+        {
+            if (e.Index < 0 || e.Index >= _devices.Count) return;
+            e.DrawBackground();
+            string text = _cbDevice.Items[e.Index].ToString();
+            using (SolidBrush b = new SolidBrush(_devices[e.Index].Allowed
+                ? Color.DarkGreen : Color.DarkRed))
+            {
+                e.Graphics.DrawString(text, e.Font, b,
+                    new Rectangle(e.Bounds.Left + 2, e.Bounds.Top + 1,
+                        e.Bounds.Width - 4, e.Bounds.Height - 2));
+            }
+            e.DrawFocusRectangle();
+        }
+
         private void OnSelection()
         {
             int i = _cbDevice.SelectedIndex;
@@ -2141,7 +2190,10 @@ namespace UsbBlockTray
             _tbType.Text = sd.UsbId;
             _tbModel.Text = string.IsNullOrEmpty(sd.BestDiskId) ? sd.Model : sd.BestDiskId;
             _ok.Enabled = !string.IsNullOrEmpty(sd.UsbId);
-            _tbName.Text = "Новий Пристрій";
+            // По умолчанию в "Ім'я Пристрою" подставляется метка тома
+            // выбранного накопителя (если метки нет - поле пустое, и при
+            // добавлении возьмётся название модели).
+            _tbName.Text = sd.Label ?? string.Empty;
         }
 
         private void Commit()
@@ -2831,6 +2883,35 @@ namespace UsbBlockTray
                 sd.BestDiskId = UsbQuery.FindDiskIdBySerial(rec.Serial);
                 sd.Model = "(заблокирован)";
                 devices.Add(sd);
+            }
+
+            // Метки (имена) томов подключённых накопителей: "Серийный" -> "Метка".
+            // Заполняем только для устройств, которые сейчас смонтированы с буквой
+            // диска (метку берём из Win32_LogicalDisk по букве тома из GetUsbVolumes).
+            try
+            {
+                Dictionary<string, string> labels = UsbQuery.GetVolumeLabels();
+                List<UsbVolume> vols = UsbQuery.GetUsbVolumes();
+                Dictionary<string, string> labelBySerial =
+                    new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (UsbVolume v in vols)
+                {
+                    if (string.IsNullOrEmpty(v.Serial) ||
+                        !labels.ContainsKey(v.DriveLetter) ||
+                        labelBySerial.ContainsKey(v.Serial))
+                        continue;
+                    labelBySerial[v.Serial] = labels[v.DriveLetter] ?? string.Empty;
+                }
+                foreach (StorageDevice d in devices)
+                {
+                    if (string.IsNullOrEmpty(d.Serial)) continue;
+                    string lab;
+                    if (labelBySerial.TryGetValue(d.Serial, out lab))
+                        d.Label = lab;
+                }
+            }
+            catch
+            {
             }
 
             return devices;
