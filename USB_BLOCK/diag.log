@@ -1,0 +1,41 @@
+﻿USB_Block tray - диагностика
+Время: 09/21/2026 11:52:20
+Администратор: False
+Защищённая копия: C:\Program Files\USB_Block\usb_block_tray.exe  существует=True
+Защищённая копия (MAA): C:\ProgramData\MAA\usb_block_tray.exe  существует=True
+Служба мониторинга: не установлена
+
+--- Политика ---
+Блокировка активна: False
+
+--- Whitelist ---
+Файл: C:\ProgramData\USB_Block\whitelist.dat
+Ошибка чтения (ожидаемо без прав администратора): Отказано в доступе по пути "C:\ProgramData\USB_Block\whitelist.dat".
+
+--- USB-диски (подключённые) ---
+Найдено: 0
+
+--- Смонтированные тома USB (точки монтирования) ---
+Найдено: 0
+
+--- USB-узлы массовой памяти ---
+Найдено: 0
+
+--- Все масс-сторадж узлы (реестр) ---
+Найдено: 16
+  USBSTOR\Disk&Ven_&Prod_USB_Disk&Rev_8.07\CDEE658E&0
+  USBSTOR\Disk&Ven_&Prod_USB_DISK_2.0&Rev_PMAP\07011327AC49A566&0
+  USBSTOR\Disk&Ven_&Prod_USB_FLASH_DRIVE&Rev_PMAP\071C41215D05A883&0
+  USBSTOR\Disk&Ven_JetFlash&Prod_Transcend_8GB&Rev_1100\081NS9HV47JMZLUQ&0
+  USBSTOR\Disk&Ven_JetFlash&Prod_Transcend_8GB&Rev_1100\41KAXI78HFCSUCJF&0
+  USBSTOR\Disk&Ven_Kingston&Prod_DataTraveler_2.0&Rev_PMAP\C860008863E7ED801A1100C7&0
+  USBSTOR\Disk&Ven_USB3.0&Prod_FLASH_DRIVE&Rev_1100\CCYYMMDDHHmmSSW3HSSI&0
+  USBSTOR\Disk&Ven_USB3.0&Prod_FLASH_DRIVE&Rev_PMAP\071C5564838EC626&0
+  USB\VID_058F&PID_6387\CDEE658E
+  USB\VID_0930&PID_6545\C860008863E7ED801A1100C7
+  USB\VID_1005&PID_B113\071C41215D05A883
+  USB\VID_1005&PID_B128\071C5564838EC626
+  USB\VID_1005&PID_B128\CCYYMMDDHHmmSSW3HSSI
+  USB\VID_13FE&PID_4300\07011327AC49A566
+  USB\VID_8564&PID_1000\081NS9HV47JMZLUQ
+  USB\VID_8564&PID_1000\41KAXI78HFCSUCJF
