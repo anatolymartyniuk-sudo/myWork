@@ -1,8 +1,7 @@
 ﻿USB_Block tray - диагностика
-Время: 09/21/2026 14:06:10
+Время: 09/21/2026 15:15:12
 Администратор: False
 Защищённая копия: C:\Program Files\USB_Block\usb_block_tray.exe  существует=True
-Защищённая копия (MAA): C:\ProgramData\MAA\usb_block_tray.exe  существует=True
 Служба мониторинга: не установлена
 
 --- Политика ---
@@ -13,13 +12,17 @@
 Ошибка чтения (ожидаемо без прав администратора): Отказано в доступе по пути "C:\ProgramData\USB_Block\whitelist.dat".
 
 --- USB-диски (подключённые) ---
-Найдено: 0
+Найдено: 1
+  INST=USBSTOR\DISK&VEN_JETFLASH&PROD_TRANSCEND_8GB&REV_1100\081NS9HV47JMZLUQ&0
+      MODEL=JetFlash Transcend 8GB USB Device  USB=USB\VID_8564&PID_1000  SN=081NS9HV47JMZLUQ  DISKID=USBSTOR\DiskJetFlashTranscend_8GB___1100
 
 --- Смонтированные тома USB (точки монтирования) ---
-Найдено: 0
+Найдено: 1
+  LETTER=G  USB=USB\VID_8564&PID_1000  SN=081NS9HV47JMZLUQ  MODEL=JetFlash Transcend 8GB USB Device
 
 --- USB-узлы массовой памяти ---
-Найдено: 0
+Найдено: 1
+  INST=USB\VID_8564&PID_1000\081NS9HV47JMZLUQ  PRESENT=True  VIDPID=USB\VID_8564&PID_1000  SN=081NS9HV47JMZLUQ  DISABLED=False
 
 --- Все масс-сторадж узлы (реестр) ---
 Найдено: 16

@@ -107,14 +107,17 @@ Whitelist
 Защищённые копии
 ----------------
 При каждом запуске от администратора программа копирует себя в
-C:\Program Files\USB_Block и C:\ProgramData\MAA (ACL: только Администраторы,
-SYSTEM; S-1-5-11 — чтение). Автозапуск и служба используют именно
-защищённую копию, поэтому программа работает независимо от того, откуда её
-запустили.
+C:\Program Files\USB_Block (ACL: только Администраторы, SYSTEM;
+S-1-5-11 — чтение). Автозапуск и служба используют именно защищённую
+копию, поэтому программа работает независимо от того, откуда её запустили.
+Вторая копия в C:\ProgramData убрана намеренно: самокопирование exe в
+скрытые папки ProgramData вместе с автозапуском даёт ложное срабатывание
+эвристики Windows Defender Behavior:Win32/Persistence.A!ml.
 
 Сборка (для разработчика)
 -------------------------
   csc -target:winexe -platform:anycpu -win32icon:stop_usb.ico
+      -win32manifest:app.manifest
       -r:System.Windows.Forms.dll -r:System.Drawing.dll
       -r:System.Management.dll -r:System.ServiceProcess.dll
       -out:usb_block_tray.exe usb_block_tray.cs

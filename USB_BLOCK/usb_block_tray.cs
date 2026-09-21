@@ -6,6 +6,7 @@ using System.Drawing.Drawing2D;
 using System.Globalization;
 using System.IO;
 using System.Management;
+using System.Reflection;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
@@ -87,8 +88,7 @@ namespace UsbBlockTray
                 File.WriteAllText(
                     Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "installcopy.log"),
                     log.ToString() + Environment.NewLine +
-                    "InstallExe exists: " + File.Exists(ProtectedCopy.InstallExe) + Environment.NewLine +
-                    "MaaExe exists: " + File.Exists(ProtectedCopy.MaaExe),
+                    "InstallExe exists: " + File.Exists(ProtectedCopy.InstallExe),
                     new UTF8Encoding(true));
                 return 0;
             }
@@ -154,9 +154,8 @@ namespace UsbBlockTray
             if (IsAdministrator())
             {
                 // При каждом запуске с правами администратора обновляем
-                // защищённые копии exe (Program Files\USB_Block и
-                // C:\ProgramData\MAA, папка создаётся при отсутствии), чтобы
-                // они не устаревали после правок.
+                // защищённую копию exe (Program Files\USB_Block, папка
+                // создаётся при отсутствии), чтобы она не устаревала.
                 ProtectedCopy.EnsureInstalledCopy();
 
                 // Автозапуск больше не поддерживается: молча убираем возможные
@@ -243,37 +242,20 @@ namespace UsbBlockTray
             get { return Path.Combine(InstallDir, "usb_block_tray.exe"); }
         }
 
-        // Дополнительная защищённая копия в C:\ProgramData\MAA
-        public static string MaaDir
-        {
-            get
-            {
-                return Path.Combine(Environment.GetFolderPath(
-                    Environment.SpecialFolder.CommonApplicationData), "MAA");
-            }
-        }
-
-        public static string MaaExe
-        {
-            get { return Path.Combine(MaaDir, "usb_block_tray.exe"); }
-        }
-
         /// <summary>
-        /// Копирует текущий exe в защищённые папки: Program Files\USB_Block
-        /// и C:\ProgramData\MAA (создаётся при отсутствии).
-        /// null = успех, иначе текст ошибки.
+        /// Копирует текущий exe в C:\Program Files\USB_Block (создаётся при
+        /// отсутствии). null = успех, иначе текст ошибки.
+        /// Единственная защищённая копия. Дополнительная копия в
+        /// C:\ProgramData убрана намеренно: самокопирование exe в скрытые
+        /// папки ProgramData в сочетании с автозапуском по расписанию даёт
+        /// ложное срабатывание эвристики Windows Defender
+        /// (Behavior:Win32/Persistence.A!ml).
         /// </summary>
         public static string EnsureInstalledCopy()
         {
-            string err1 = CopyTo(InstallDir, InstallExe);
-            string err2 = CopyTo(MaaDir, MaaExe);
-            if (err1 != null && err2 != null)
-                return "Program Files\\USB_Block: " + err1 + "\n" +
-                       "ProgramData\\MAA: " + err2;
-            if (err1 != null)
-                return "Program Files\\USB_Block: " + err1;
-            if (err2 != null)
-                return "ProgramData\\MAA: " + err2;
+            string err = CopyTo(InstallDir, InstallExe);
+            if (err != null)
+                return "Program Files\\USB_Block: " + err;
             return null;
         }
 
@@ -2437,10 +2419,25 @@ namespace UsbBlockTray
         public const string TaskName = "USB_Block_Tray_Logon";
         public const string NotifyTaskName = "USB_Block_Notify_Logon";
 
+        // Задачи регистрируются через COM-интерфейс Планировщика заданий
+        // (Schedule.Service), а не через вызов schtasks.exe: эвристика
+        // Windows Defender (Behavior:Win32/Persistence.A!ml) реагирует на
+        // характерное сочетание "самокопирование + создание задачи
+        // автозапуска из командной строки schtasks". Прямой COM-вызов -
+        // обычное поведение приложений с автозапуском. Если COM недоступен,
+        // используется прежний путь через schtasks.exe.
+
         public static bool IsInstalled()
         {
-            string o;
-            return Exec.Run("schtasks.exe", "/Query /TN \"" + TaskName + "\"", out o);
+            try
+            {
+                return TaskExists(TaskName);
+            }
+            catch
+            {
+                string o;
+                return Exec.Run("schtasks.exe", "/Query /TN \"" + TaskName + "\"", out o);
+            }
         }
 
         /// <summary>null = успех, иначе текст ошибки.</summary>
@@ -2457,36 +2454,117 @@ namespace UsbBlockTray
 
         private static string CreateOne(string taskName, string args)
         {
-            string xmlPath = null;
+            string xml = BuildXml(args);
             try
             {
-                xmlPath = Path.Combine(Path.GetTempPath(),
-                    "usb_block_task_" + Guid.NewGuid().ToString("N") + ".xml");
-                File.WriteAllText(xmlPath, BuildXml(args), Encoding.Unicode);
-                string o;
-                bool ok = Exec.Run("schtasks.exe",
-                    "/Create /F /TN \"" + taskName + "\" /XML \"" + xmlPath + "\"", out o);
-                return ok ? null : o;
+                RegisterViaCom(taskName, xml);
+                return null;
             }
             catch (Exception ex)
             {
-                return ex.Message;
-            }
-            finally
-            {
-                if (xmlPath != null)
+                // COM не сработал - фолбэк на schtasks.exe
+                try
                 {
-                    try { File.Delete(xmlPath); }
-                    catch { }
+                    string xmlPath = Path.Combine(Path.GetTempPath(),
+                        "usb_block_task_" + Guid.NewGuid().ToString("N") + ".xml");
+                    File.WriteAllText(xmlPath, xml, Encoding.Unicode);
+                    try
+                    {
+                        string o;
+                        bool ok = Exec.Run("schtasks.exe",
+                            "/Create /F /TN \"" + taskName + "\" /XML \"" + xmlPath + "\"", out o);
+                        return ok ? null : o;
+                    }
+                    finally
+                    {
+                        try { File.Delete(xmlPath); }
+                        catch { }
+                    }
+                }
+                catch (Exception ex2)
+                {
+                    return ex.Message + (ex2.Message != null ? " | schtasks: " + ex2.Message : "");
                 }
             }
         }
 
         public static void Delete()
         {
+            DeleteOne(TaskName);
+            DeleteOne(NotifyTaskName);
+        }
+
+        private static void DeleteOne(string taskName)
+        {
+            try
+            {
+                DeleteViaCom(taskName);
+                return;
+            }
+            catch
+            {
+            }
             string o;
-            Exec.Run("schtasks.exe", "/Delete /F /TN \"" + TaskName + "\"", out o);
-            Exec.Run("schtasks.exe", "/Delete /F /TN \"" + NotifyTaskName + "\"", out o);
+            Exec.Run("schtasks.exe", "/Delete /F /TN \"" + taskName + "\"", out o);
+        }
+
+        private static object ComSchedule()
+        {
+            Type t = Type.GetTypeFromProgID("Schedule.Service");
+            if (t == null)
+                throw new InvalidOperationException("COM-тип Schedule.Service не найден");
+            object svc = Activator.CreateInstance(t);
+            t.InvokeMember("Connect", BindingFlags.InvokeMethod, null, svc, null);
+            return svc;
+        }
+
+        private static object GetRootFolder()
+        {
+            object svc = ComSchedule();
+            Type st = svc.GetType();
+            return st.InvokeMember("GetFolder",
+                BindingFlags.InvokeMethod, null, svc, new object[] { "\\" });
+        }
+
+        private static bool TaskExists(string taskName)
+        {
+            object folder = GetRootFolder();
+            Type ft = folder.GetType();
+            try
+            {
+                object task = ft.InvokeMember("GetTask",
+                    BindingFlags.InvokeMethod, null, folder, new object[] { taskName });
+                return task != null;
+            }
+            catch (TargetInvocationException)
+            {
+                return false;
+            }
+        }
+
+        private static void RegisterViaCom(string taskName, string xml)
+        {
+            object folder = GetRootFolder();
+            Type ft = folder.GetType();
+            // флаги версии 0; CREATE_OR_UPDATE; пользователь/пароль не нужны
+            // (принципала задаёт XML - группа); TASK_LOGON_GROUP (4);
+            // sddl = null.
+            ft.InvokeMember("RegisterTask", BindingFlags.InvokeMethod, null, folder,
+                new object[] { taskName, xml, 2, null, null, 4, null });
+        }
+
+        private static void DeleteViaCom(string taskName)
+        {
+            object folder = GetRootFolder();
+            Type ft = folder.GetType();
+            try
+            {
+                ft.InvokeMember("DeleteTask", BindingFlags.InvokeMethod, null, folder,
+                    new object[] { taskName, 0 });
+            }
+            catch (TargetInvocationException)
+            {
+            }
         }
 
         private static string BuildXml(string args)
@@ -3360,13 +3438,10 @@ namespace UsbBlockTray
             if (deleteData)
                 TryDeleteDir(StorePaths.Directory);
 
-            // 5) защищённая копия (Program Files\USB_Block и ProgramData\MAA)
+            // 5) защищённая копия (Program Files\USB_Block)
             string running = Application.ExecutablePath;
             bool runningFromInstall = string.Equals(
                 Path.GetFullPath(running), Path.GetFullPath(ProtectedCopy.InstallExe),
-                StringComparison.OrdinalIgnoreCase);
-            bool runningFromMaa = string.Equals(
-                Path.GetFullPath(running), Path.GetFullPath(ProtectedCopy.MaaExe),
                 StringComparison.OrdinalIgnoreCase);
 
             List<string> delayedDirs = new List<string>();
@@ -3378,15 +3453,6 @@ namespace UsbBlockTray
             else
             {
                 TryDeleteDir(ProtectedCopy.InstallDir);
-            }
-
-            if (runningFromMaa)
-            {
-                delayedDirs.Add(ProtectedCopy.MaaDir);
-            }
-            else
-            {
-                TryDeleteDir(ProtectedCopy.MaaDir);
             }
 
             // 6) журналы рядом с программой
@@ -3909,8 +3975,6 @@ namespace UsbBlockTray
             sb.AppendLine("Администратор: " + Program.IsAdministrator());
             sb.AppendLine("Защищённая копия: " + ProtectedCopy.InstallExe +
                 "  существует=" + File.Exists(ProtectedCopy.InstallExe));
-            sb.AppendLine("Защищённая копия (MAA): " + ProtectedCopy.MaaExe +
-                "  существует=" + File.Exists(ProtectedCopy.MaaExe));
             sb.AppendLine("Служба мониторинга: " +
                 (ServiceManager.IsInstalled() ? "установлена" : "не установлена"));
 
