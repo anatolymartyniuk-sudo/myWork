@@ -21,6 +21,7 @@ namespace UsbBlockTray
     internal static class Program
     {
         private const string MutexName = @"Local\UsbBlockTray_SingleInstance_v2";
+        private const string NotifyMutexName = @"Local\UsbBlockNotify_SingleInstance_v2";
 
         public static readonly string Title = "USB-блокировка";
 
@@ -36,6 +37,7 @@ namespace UsbBlockTray
             bool makeCopies = false;
             bool service = false;
             bool logon = false;
+            bool notify = false;
 
             foreach (string a in args)
             {
@@ -54,6 +56,9 @@ namespace UsbBlockTray
                 if (string.Equals(a, "--logon", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(a, "-logon", StringComparison.OrdinalIgnoreCase))
                     logon = true;
+                if (string.Equals(a, "--notify", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(a, "-notify", StringComparison.OrdinalIgnoreCase))
+                    notify = true;
             }
 
             if (service)
@@ -101,11 +106,30 @@ namespace UsbBlockTray
                 return Diag.Run();
             }
 
+            // УВЕДОМИТЕЛЬ (--notify): отдельный невидимый процесс, который
+            // запускается задачей при входе ЛЮБОГО пользователя и показывает
+            // всплывающие сообщения о блокировках. Живёт НЕЗАВИСИМО от трея,
+            // поэтому выгрузка трея ("Выход") не отключает уведомления.
+            // Повышение прав не запрашивается (для администраторов задача
+            // и так стартует с полным токеном, для остальных - с их правами).
+            if (notify)
+            {
+                bool createdNotify;
+                using (Mutex nmtx = new Mutex(true, NotifyMutexName, out createdNotify))
+                {
+                    if (createdNotify)
+                    {
+                        NotifyService.Run();
+                    }
+                }
+                return 0;
+            }
+
             // Запуск из задачи Планировщика при входе пользователя (--logon,
-            // значок в трее + уведомления для ВСЕХ пользователей): повышения
-            // прав НЕ запрашиваем. У администраторов задача запускается уже
-            // с полным токеном (RunLevel=Highest), у остальных - без прав;
-            // меню при этом автоматически сокращается до уведомлений.
+            // значок в трее для ВСЕХ пользователей): повышения прав НЕ
+            // запрашиваем. У администраторов задача запускается уже с полным
+            // токеном (RunLevel=HighestAvailable), у остальных - без прав;
+            // меню при этом автоматически сокращается.
             if (!logon && !IsAdministrator())
             {
                 // Повышение прав (UAC) на старте - иначе нельзя применять
@@ -2343,17 +2367,23 @@ namespace UsbBlockTray
     }
 
     // =====================================================================
-    // Задача Планировщика "значок в трее для всех пользователей".
-    // Создаётся при установке службы мониторинга: при входе ЛЮБОГО
-    // пользователя запускается usb_block_tray.exe --logon.
-    //  * для администраторов задача стартует с наивысшими правами
-    //    (RunLevel=Highest) молча, без запроса UAC - полное меню управления;
-    //  * для обычных пользователей процесс стартует без прав - только статус,
-    //    уведомления о блокировках и выход.
+    // Задачи Планировщика "значок в трее для всех пользователей",
+    // создаются при установке службы мониторинга (при входе ЛЮБОГО
+    // пользователя запускаются usb_block_tray.exe --logon и
+    // usb_block_tray.exe --notify):
+    //  * USB_Block_Tray_Logon   - значок в трее (--logon);
+    //  * USB_Block_Notify_Logon - скрытый уведомитель (--notify),
+    //    живёт ОТДЕЛЬНО от трея, поэтому даже если пользователь выгрузил
+    //    трей ("Выход"), сообщения о блокировках продолжают приходить.
+    //  * для администраторов задачи стартуют с наивысшими правами
+    //    (RunLevel=HighestAvailable) молча, без запроса UAC;
+    //  * для обычных пользователей процессы стартуют без прав - у трея
+    //    только статус и выход, уведомитель работает всегда.
     // =====================================================================
     public static class TrayTask
     {
         public const string TaskName = "USB_Block_Tray_Logon";
+        public const string NotifyTaskName = "USB_Block_Notify_Logon";
 
         public static bool IsInstalled()
         {
@@ -2364,16 +2394,27 @@ namespace UsbBlockTray
         /// <summary>null = успех, иначе текст ошибки.</summary>
         public static string Create()
         {
+            List<string> errors = new List<string>();
+            string t = CreateOne(TaskName, "--logon");
+            if (t != null) errors.Add("задача трея: " + t);
+            string n = CreateOne(NotifyTaskName, "--notify");
+            if (n != null) errors.Add("задача уведомлений: " + n);
+            if (errors.Count == 0) return null;
+            return string.Join("\n", errors.ToArray());
+        }
+
+        private static string CreateOne(string taskName, string args)
+        {
             string xmlPath = null;
             try
             {
                 xmlPath = Path.Combine(Path.GetTempPath(),
-                    "usb_block_tray_task_" + Guid.NewGuid().ToString("N") + ".xml");
-                File.WriteAllText(xmlPath, BuildXml(), Encoding.Unicode);
+                    "usb_block_task_" + Guid.NewGuid().ToString("N") + ".xml");
+                File.WriteAllText(xmlPath, BuildXml(args), Encoding.Unicode);
                 string o;
                 bool ok = Exec.Run("schtasks.exe",
-                    "/Create /F /TN \"" + TaskName + "\" /XML \"" + xmlPath + "\"", out o);
-                return ok ? null : ("Не удалось создать задачу (schtasks): " + o);
+                    "/Create /F /TN \"" + taskName + "\" /XML \"" + xmlPath + "\"", out o);
+                return ok ? null : o;
             }
             catch (Exception ex)
             {
@@ -2393,9 +2434,10 @@ namespace UsbBlockTray
         {
             string o;
             Exec.Run("schtasks.exe", "/Delete /F /TN \"" + TaskName + "\"", out o);
+            Exec.Run("schtasks.exe", "/Delete /F /TN \"" + NotifyTaskName + "\"", out o);
         }
 
-        private static string BuildXml()
+        private static string BuildXml(string args)
         {
             // Задача на группу "Users" (S-1-5-32-545): срабатывает при входе
             // любого пользователя, с его токеном и наивысшим доступным уровнем
@@ -2446,7 +2488,7 @@ namespace UsbBlockTray
                 "  <Actions Context=\"Author\">\r\n" +
                 "    <Exec>\r\n" +
                 "      <Command>" + command + "</Command>\r\n" +
-                "      <Arguments>--logon</Arguments>\r\n" +
+                "      <Arguments>" + args + "</Arguments>\r\n" +
                 "    </Exec>\r\n" +
                 "  </Actions>\r\n" +
                 "</Task>\r\n";
@@ -3124,7 +3166,9 @@ namespace UsbBlockTray
                 }
                 _icon.ShowBalloonTip(3000, Program.Title,
                     "Служба мониторинга установлена и запущена от имени SYSTEM.\n" +
-                    "Значок в трее появится у всех пользователей после перезагрузки.",
+                    "Значок в трее и уведомления появятся у всех пользователей\n" +
+                    "после перезагрузки. Уведомления работают независимо от\n" +
+                    "выгрузки значка из трея.",
                     ToolTipIcon.Info);
             }
             catch (Exception ex)
@@ -3351,8 +3395,11 @@ namespace UsbBlockTray
             }
         }
 
-        // Тик фонового таймера: блокировка (только под администратором) +
-        // опрос очереди событий блокировок и уведомление пользователя.
+        // Тик фонового таймера: активная блокировка (только под
+        // администратором). УВЕДОМЛЕНИЙ трей больше не показывает - ими
+        // занимается отдельный процесс NotifyService (запуск через задачу
+        // при входе), который живёт независимо от трея, поэтому после
+        // "Выход" из трея сообщения о блокировках продолжают приходить.
         private void TickScan()
         {
             if (_busy) return;
@@ -3363,7 +3410,6 @@ namespace UsbBlockTray
                 {
                     RunScan();
                 }
-                PollAndNotify();
             }
             catch
             {
@@ -3377,8 +3423,9 @@ namespace UsbBlockTray
 
         // Активная блокировка: снимает точки монтирования посторонних
         // накопителей и записывает события в общую очередь
-        // (HKLM\SOFTWARE\USB_Block\Events), которую читают треи всех
-        // пользователей - так уведомление получают все.
+        // (HKLM\SOFTWARE\USB_Block\Events), которую читает процесс-
+        // уведомитель каждого пользователя - так сообщение о блокировке
+        // получают ВСЕ пользователи, в т.ч. после выгрузки трея.
         private void RunScan()
         {
             List<UsbNode> nodes;
@@ -3390,55 +3437,6 @@ namespace UsbBlockTray
                 {
                     NotifyStore.Write(b.Serial, b.Label);
                 }
-            }
-        }
-
-        // Читает очередь событий и показывает пользователю те, которых он
-        // ещё не видел (последний просмотренный номер хранится в HKCU).
-        private void PollAndNotify()
-        {
-            List<NotifyStore.BlockEvent> evs = NotifyStore.ReadAll();
-            if (evs.Count == 0) return;
-            long last = NotifyStore.GetLastSeen();
-            long max = 0;
-            foreach (NotifyStore.BlockEvent e in evs)
-            {
-                if (e.Id > last && e.Id > max) max = e.Id;
-            }
-            if (max <= last) return;
-
-            foreach (NotifyStore.BlockEvent e in evs)
-            {
-                if (e.Id > last) NotifyEvent(e);
-            }
-            NotifyStore.SetLastSeen(max);
-        }
-
-        private void NotifyEvent(NotifyStore.BlockEvent e)
-        {
-            string what = string.IsNullOrEmpty(e.Label) ? e.Serial : e.Label;
-            if (string.IsNullOrEmpty(what)) what = "USB-накопитель";
-            string detail = "Заблокирован накопитель: " + what +
-                (string.IsNullOrEmpty(e.Serial) ? string.Empty : "  SN=" + e.Serial);
-
-            _icon.ShowBalloonTip(8000, Program.Title, detail, ToolTipIcon.Warning);
-
-            // Устаревшие события (задержанные до следующего входа) - только
-            // баллоном, чтобы не раздражать всплывающими окнами.
-            bool recent = (DateTime.Now - e.When).TotalMinutes < 2;
-            if (!recent) return;
-
-            string msg = Program.NotifyText + "\n\n(" + detail + ")\n\n";
-            msg += Program.IsAdministrator()
-                ? "Чтобы разрешить этот накопитель:\nзначок в трее -> 3 Добавить устройство."
-                : "Управление настройками доступно только администраторам.";
-            try
-            {
-                MessageBox.Show(msg, Program.Title,
-                    MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
-            }
-            catch
-            {
             }
         }
 
@@ -3470,6 +3468,155 @@ namespace UsbBlockTray
                 _icon = null;
             }
             base.ExitThreadCore();
+        }
+    }
+
+    // =====================================================================
+// Уведомитель (--notify). Отдельный невидимый процесс БЕЗ трея, который
+// запускается задачей при входе каждого пользователя и показывает
+// всплывающие сообщения о блокировках из общей очереди событий
+// (HKLM\SOFTWARE\USB_Block\Events). В отличие от трея, этот процесс не
+// имеет меню и его нечем "выгрузить" из трея: даже если пользователь
+// закрыл трей через "Выход", уведомитель продолжает работать и сообщения
+// доходят. Один экземпляр на сессию (мьютекс Local\UsbBlockNotify_*).
+// =====================================================================
+    public static class NotifyService
+    {
+        private static System.Windows.Forms.Timer _poll;
+        private static readonly Queue<string> _queue = new Queue<string>();
+        private static NotifyPopup _active;
+        private static int _topOffset = 0;
+
+        public static void Run()
+        {
+            _poll = new System.Windows.Forms.Timer();
+            _poll.Interval = 2500;
+            _poll.Tick += delegate { Poll(); };
+            _poll.Start();
+            Poll();
+            Application.Run();
+        }
+
+        private static void Poll()
+        {
+            List<NotifyStore.BlockEvent> evs = NotifyStore.ReadAll();
+            if (evs.Count == 0) return;
+            long last = NotifyStore.GetLastSeen();
+            long max = 0;
+            foreach (NotifyStore.BlockEvent e in evs)
+                if (e.Id > last && e.Id > max) max = e.Id;
+            if (max <= last) return;
+
+            foreach (NotifyStore.BlockEvent e in evs)
+            {
+                if (e.Id > last) _queue.Enqueue(BuildText(e));
+            }
+            NotifyStore.SetLastSeen(max);
+
+            if (_active == null)
+            {
+                ShowNext();
+            }
+        }
+
+        private static void ShowNext()
+        {
+            if (_queue.Count == 0)
+            {
+                _topOffset = 0;
+                return;
+            }
+            string text = _queue.Dequeue();
+            _active = new NotifyPopup(text);
+            _active.TopOffset = _topOffset;
+            _topOffset += _active.ExpectedHeight + 8;
+            if (_topOffset > (Screen.PrimaryScreen.WorkingArea.Height - 120))
+                _topOffset = 0;
+            _active.FormClosed += delegate
+            {
+                _active = null;
+                ShowNext();
+            };
+            _active.Show();
+        }
+
+        private static string BuildText(NotifyStore.BlockEvent e)
+        {
+            string what = string.IsNullOrEmpty(e.Label) ? e.Serial : e.Label;
+            if (string.IsNullOrEmpty(what)) what = "USB-накопитель";
+            string detail = "Заблокирован накопитель: " + what +
+                (string.IsNullOrEmpty(e.Serial) ? string.Empty : "  SN=" + e.Serial);
+            return Program.NotifyText + "\n\n(" + detail + ")";
+        }
+    }
+
+    // Всплывающее окно-сообщение (без рамки, справа внизу, закрывается само)
+    public sealed class NotifyPopup : Form
+    {
+        private System.Windows.Forms.Timer _close;
+        private Label _lbl;
+        private readonly Size _textSize;
+        public int TopOffset = 0;
+
+        public int ExpectedHeight
+        {
+            get { return _textSize.Height + 32; }
+        }
+
+        public NotifyPopup(string text)
+        {
+            this.FormBorderStyle = FormBorderStyle.None;
+            this.StartPosition = FormStartPosition.Manual;
+            this.ShowInTaskbar = false;
+            this.TopMost = true;
+            this.Font = new Font("Segoe UI", 9f);
+            this.BackColor = Color.FromArgb(255, 245, 225);
+
+            _textSize = TextRenderer.MeasureText(text, this.Font,
+                new Size(350, int.MaxValue), TextFormatFlags.WordBreak);
+            int w = Math.Max(200, _textSize.Width + 8);
+            int h = Math.Max(40, _textSize.Height + 8);
+
+            _lbl = new Label();
+            _lbl.Text = text;
+            _lbl.Size = new Size(w, h);
+            _lbl.Font = this.Font;
+            _lbl.ForeColor = Color.FromArgb(0, 51, 102);
+            _lbl.Location = new Point(14, 12);
+            this.Controls.Add(_lbl);
+
+            this.Click += delegate { CloseSelf(); };
+            _lbl.Click += delegate { CloseSelf(); };
+
+            _close = new System.Windows.Forms.Timer();
+            _close.Interval = 6000;
+            _close.Tick += delegate { CloseSelf(); };
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+            this.ClientSize = new Size(_textSize.Width + 30, Math.Max(50, _textSize.Height + 24));
+            this.Location = new Point(wa.Right - this.Width - 12,
+                wa.Bottom - this.Height - 12 - TopOffset);
+            _close.Start();
+        }
+
+        private void CloseSelf()
+        {
+            _close.Stop();
+            this.Close();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (_close != null)
+            {
+                _close.Dispose();
+                _close = null;
+            }
+            base.Dispose(disposing);
         }
     }
 
