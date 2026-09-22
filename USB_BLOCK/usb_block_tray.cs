@@ -3936,21 +3936,54 @@ namespace UsbBlockTray
             long last = NotifyStore.GetLastSeen();
             long max = 0;
             foreach (NotifyStore.BlockEvent e in evs)
-                if (e.Id > last && e.Id > max) max = e.Id;
-            if (max <= last) return;
+                if (e.Id > max) max = e.Id;
+            if (last == max) return;
 
-            foreach (NotifyStore.BlockEvent e in evs)
+            if (last > max)
             {
-                if (e.Id > last) _queue.Enqueue(new QueueItem { Id = e.Id, Text = BuildText(e) });
+                // Самовосстановление: счётчик этого пользователя оказался
+                // ВПЕРЕДИ последнего события очереди (очередь чистили/
+                // сбрасывали, а HKCU остался больше). Иначе сообщение о
+                // блокировке id=max НИКОГДА не показалось бы этому
+                // пользователю. Показываем самое свежее событие один раз -
+                // после показа Displayed выравнивает счётчик по max
+                // (уменьшение допустимо: это единственный способ закончить
+                // восстановление, иначе диагноз так и останется "всё новое").
+                if (!IsScheduled(max))
+                {
+                    NotifyStore.BlockEvent newest = evs[evs.Count - 1];
+                    _queue.Enqueue(new QueueItem { Id = newest.Id, Text = BuildText(newest) });
+                    TraceLog("счётчик впереди очереди (last=" +
+                        last.ToString(CultureInfo.InvariantCulture) + " > max=" +
+                        max.ToString(CultureInfo.InvariantCulture) +
+                        "): извлекаю последнее событие id=" +
+                        newest.Id.ToString(CultureInfo.InvariantCulture));
+                }
             }
-            TraceLog("в очереди показа " + _queue.Count +
-                ", новых с id>" + last.ToString(CultureInfo.InvariantCulture) +
-                " до " + max.ToString(CultureInfo.InvariantCulture));
+            else
+            {
+                foreach (NotifyStore.BlockEvent e in evs)
+                {
+                    if (e.Id > last) _queue.Enqueue(new QueueItem { Id = e.Id, Text = BuildText(e) });
+                }
+                TraceLog("в очереди показа " + _queue.Count +
+                    ", новых с id>" + last.ToString(CultureInfo.InvariantCulture) +
+                    " до " + max.ToString(CultureInfo.InvariantCulture));
+            }
 
             if (_active == null)
             {
                 ShowNext();
             }
+        }
+
+        // Это событие уже стоит в очереди показа или в активном окне?
+        private static bool IsScheduled(long id)
+        {
+            if (_active != null && _active.NotificationId == id) return true;
+            foreach (QueueItem q in _queue)
+                if (q.Id == id) return true;
+            return false;
         }
 
         private static void ShowNext()
