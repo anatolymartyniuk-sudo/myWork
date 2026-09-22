@@ -1,6 +1,6 @@
 ﻿Файл этого лога: D:\Work\USB_BLOCK\diag.log
 USB_Block tray - диагностика
-Время: 09/22/2026 13:59:58
+Время: 09/22/2026 16:22:55
 Администратор: False
 Защищённая копия: C:\Program Files\USB_Block\usb_block_tray.exe  существует=True
 Служба мониторинга: не установлена
@@ -10,7 +10,7 @@ USB_Block tray - диагностика
 Событие блокировки (очередь): записей=1, макс.id=1, LastEventId(HKCU)=1
 Источник журнала событий (UsbBlockMonitor): не удалось определить (Источник не найден, но не удалось выполнить поиск по нескольким или всем журналам событий.  Недоступные журналы: Security, State.)
 Запись в очередь (HKLM\SOFTWARE\USB_Block\Events): НЕТ (Отказано в доступе к разделу реестра "HKEY_LOCAL_MACHINE\SOFTWARE\USB_Block\Events".)
-Лог показа уведомлений (C:\Users\odmin\AppData\Local\Temp\usb_block_notify.log):
+Лог показа уведомлений (хвост usb_block_notify.log из %TEMP% и Windows\Temp):
   <нет лога - показ ещё не запускался>
 
 --- Политика ---

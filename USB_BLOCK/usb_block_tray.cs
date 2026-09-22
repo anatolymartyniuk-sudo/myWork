@@ -4187,6 +4187,22 @@ namespace UsbBlockTray
             }
         }
 
+        // Статус службы ("Running"/"Stopped"/...) или текст ошибки. Нужно для
+        // --diag: ряд проблем оказался тем, что служба установлена, но не
+        // работает, - тогда события в очереди некому писать.
+        public static string StatusText()
+        {
+            try
+            {
+                using (ServiceController sc = new ServiceController(ServiceName))
+                    return sc.Status.ToString();
+            }
+            catch (Exception ex)
+            {
+                return "недоступна (" + ex.Message + ")";
+            }
+        }
+
         /// <summary>null = успех, иначе текст ошибки.</summary>
         public static string Install()
         {
@@ -4381,7 +4397,9 @@ namespace UsbBlockTray
             sb.AppendLine("Защищённая копия: " + ProtectedCopy.InstallExe +
                 "  существует=" + File.Exists(ProtectedCopy.InstallExe));
             sb.AppendLine("Служба мониторинга: " +
-                (ServiceManager.IsInstalled() ? "установлена" : "не установлена"));
+                (ServiceManager.IsInstalled()
+                    ? ServiceManager.StatusText()
+                    : "не установлена"));
             sb.AppendLine("Задача трея (--logon): " +
                 (TrayTask.IsInstalled() ? "есть" : "нет"));
             sb.AppendLine("Задача уведомителя (--notify): " +
@@ -4548,12 +4566,22 @@ namespace UsbBlockTray
         {
             List<string> paths = new List<string>();
             paths.Add(NotifyService.TracePath);
-            string sysTrace = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.Windows),
-                "Temp", "usb_block_notify.log");
+            string sysRoot = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            // Лог СЛУЖБЫ (LocalSystem). В зависимости от версии ОС
+            // GetTempPath() у SYSTEM даёт либо Windows\Temp, либо temp
+            // системного профиля - проверяем оба места.
+            string sysTrace = Path.Combine(sysRoot, "Temp", "usb_block_notify.log");
             if (string.Equals(sysTrace, NotifyService.TracePath,
                 StringComparison.OrdinalIgnoreCase) == false)
                 paths.Add(sysTrace);
+            string sysProfileTrace = Path.Combine(sysRoot,
+                "System32", "config", "systemprofile", "AppData", "Local",
+                "Temp", "usb_block_notify.log");
+            if (string.Equals(sysProfileTrace, NotifyService.TracePath,
+                StringComparison.OrdinalIgnoreCase) == false &&
+                string.Equals(sysProfileTrace, sysTrace,
+                StringComparison.OrdinalIgnoreCase) == false)
+                paths.Add(sysProfileTrace);
 
             StringBuilder sb = new StringBuilder();
             bool any = false;
