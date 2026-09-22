@@ -1135,9 +1135,89 @@ namespace UsbBlockTray
             return list;
         }
 
-        // Перечисляет смонтированные тома USB-накопителей с их буквами дисков.
-        // Цепочка WMI: Win32_DiskDrive (USB) -> DiskIndex -> Win32_DiskPartition
-        // -> Win32_LogicalDiskToPartition -> буква диска.
+        // USB-диски, которые СЕЙЧАС присутствуют, имеют разделы, но НИ ОДИН
+        // раздел не смонтирован буквой диска. Это накопители, которым букву
+        // давно сняли наши же mountvol /D: на ПЕРЕЗАГРУЗКЕ Windows такой том
+        // остаётся висящим только на системном \??\Volume{GUID}, букву не
+        // получает, и обычный скан по буквам (GetUsbVolumes) его НЕ видит -
+        // уведомление про "вставленный при загрузке" накопитель не уходит.
+        internal static List<StorageDevice> GetUsbDisksWithNoLetter(
+            List<StorageDevice> disks)
+        {
+            List<StorageDevice> result = new List<StorageDevice>();
+            if (disks == null || disks.Count == 0) return result;
+
+            Dictionary<int, StorageDevice> diskByIndex = new Dictionary<int, StorageDevice>();
+            foreach (StorageDevice sd in disks)
+            {
+                int idx = ParseDriveIndex(sd.DiskDeviceId);
+                if (idx >= 0 && !diskByIndex.ContainsKey(idx))
+                    diskByIndex[idx] = sd;
+            }
+            if (diskByIndex.Count == 0) return result;
+
+            Dictionary<string, int> partByDevId = new Dictionary<string, int>();
+            try
+            {
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
+                    "root\\cimv2",
+                    "SELECT DeviceID, DiskIndex FROM Win32_DiskPartition"))
+                using (ManagementObjectCollection coll = searcher.Get())
+                {
+                    foreach (ManagementObject mo in coll)
+                    {
+                        string pd = (string)mo["DeviceID"];
+                        object di = mo["DiskIndex"];
+                        if (string.IsNullOrEmpty(pd) || di == null) continue;
+                        try
+                        {
+                            partByDevId[pd] = unchecked((int)Convert.ToUInt32(di));
+                        }
+                        catch
+                        {
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            HashSet<int> withLetter = new HashSet<int>();
+            try
+            {
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
+                    "root\\cimv2",
+                    "SELECT Antecedent, Dependent FROM Win32_LogicalDiskToPartition"))
+                using (ManagementObjectCollection coll = searcher.Get())
+                {
+                    foreach (ManagementObject mo in coll)
+                    {
+                        string ant = (string)mo["Antecedent"];
+                        string dep = (string)mo["Dependent"];
+                        if (string.IsNullOrEmpty(ant) || string.IsNullOrEmpty(dep)) continue;
+                        string letter = ExtractDriveLetter(dep);
+                        if (string.IsNullOrEmpty(letter)) continue;
+                        string partDevId = MatchPartitionId(ant, partByDevId);
+                        if (partDevId == null) continue;
+                        withLetter.Add(partByDevId[partDevId]);
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            HashSet<int> hasPartition = new HashSet<int>(partByDevId.Values);
+            foreach (KeyValuePair<int, StorageDevice> kv in diskByIndex)
+            {
+                int idx = kv.Key;
+                if (!hasPartition.Contains(idx)) continue;  // без разделов - не данные
+                if (withLetter.Contains(idx)) continue;     // есть буква - обработает обычный путь
+                result.Add(kv.Value);
+            }
+            return result;
+        }
         public static List<UsbVolume> GetUsbVolumes()
         {
             return GetVolumes(true);
@@ -1925,16 +2005,95 @@ namespace UsbBlockTray
                     // пользователю всё равно нужно. Успешно снятый том
                     // исчезает из GetUsbVolumes и больше сюда не попадает,
                     // а повторные срабатывания для неубранного тома гасит
-                    // дедупликация в NotifyStore.Write (окно 30 с).
+                    // дедупликация в NotifyStore.Write (окно 3 с).
                     newly.Add(new BlockedDevice
                     {
                         Label = string.IsNullOrEmpty(v.Model) ? v.UsbId : v.Model,
                         Serial = v.Serial
                     });
+                    // Диск, которому только что сняли букву, НЕ должен тут же
+                    // попасть в список "без буквы" и задвоить уведомление.
+                    string vkey = DiskKey(v.DiskId, v.UsbId, v.Serial);
+                    if (vkey != null) _reportedLetterless.Add(vkey);
                 }
+
+                // Посторонние USB-диски БЕЗ БУКВЫ (в т.ч. "вставленные при
+                // загрузке", которым буква не выделяется после наших же
+                // снятий) - уведомляем о них один раз за их присутствие,
+                // иначе блокировка есть, а сообщения о ней нет.
+                AddLetterlessUnallowed(newly, wl, disks);
             }
 
             return newly;
+        }
+
+        // Отслеживание уже уведомлённых дисков без буквы (per-процесс):
+        // повторного спама раз в 2 с нет, а каждый НОВЫЙ физический
+        // подключаемый даёт своё уведомление. Сбрасывается перезапуском
+        // процесса (т.е. следующим входом/перезагрузкой) - как надо.
+        private static readonly HashSet<string> _reportedLetterless =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        private static string DiskKey(string diskId, string usbId, string serial)
+        {
+            if (!string.IsNullOrEmpty(serial)) return "SN:" + serial;
+            if (!string.IsNullOrEmpty(usbId)) return "USB:" + usbId;
+            if (!string.IsNullOrEmpty(diskId)) return "DISK:" + diskId;
+            return null;
+        }
+
+        private static string DiskKey(StorageDevice d)
+        {
+            return DiskKey(d.DiskDeviceId, d.UsbId, d.Serial);
+        }
+
+        // Разрешён ли диск по whitelist (аналог IsVolumeAllowed для диска).
+        private static bool IsDiskAllowed(StorageDevice d, List<DeviceEntry> wl)
+        {
+            if (wl == null || d == null) return false;
+            foreach (DeviceEntry e in wl)
+            {
+                if (!string.IsNullOrEmpty(e.UsbId) &&
+                    !string.Equals(e.UsbId, d.UsbId ?? "", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                if (!string.IsNullOrEmpty(e.Serial) &&
+                    !string.IsNullOrEmpty(d.Serial) &&
+                    !string.Equals(e.Serial, d.Serial, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                return true;
+            }
+            return false;
+        }
+
+        private static void AddLetterlessUnallowed(
+            List<BlockedDevice> newly, List<DeviceEntry> wl, List<StorageDevice> disks)
+        {
+            if (wl == null) return;
+            List<StorageDevice> letterless = UsbQuery.GetUsbDisksWithNoLetter(disks);
+            HashSet<string> present = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (StorageDevice d in letterless)
+            {
+                string key = DiskKey(d);
+                if (key == null) continue;
+                present.Add(key);
+                if (IsDiskAllowed(d, wl)) continue;
+                if (_reportedLetterless.Contains(key)) continue;
+                _reportedLetterless.Add(key);
+                newly.Add(new BlockedDevice
+                {
+                    Label = string.IsNullOrEmpty(d.Model) ? d.UsbId : d.Model,
+                    Serial = d.Serial
+                });
+            }
+            if (_reportedLetterless.Count == 0) return;
+            List<string> gone = new List<string>();
+            foreach (string k in _reportedLetterless)
+                if (!present.Contains(k)) gone.Add(k);
+            foreach (string k in gone) _reportedLetterless.Remove(k);
         }
 
         // Соответствует ли том разрешённому устройству из whitelist
