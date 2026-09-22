@@ -1668,7 +1668,13 @@ namespace UsbBlockTray
     {
         private const string EventsKey = @"SOFTWARE\USB_Block\Events";
         private const int MaxEvents = 32;
-        private static readonly TimeSpan DedupWindow = TimeSpan.FromSeconds(30);
+        // Окно дедупликации: то же устройство, заблокированное в этом окне,
+        // повторно НЕ уведомляется. Нужно ТОЛЬКО чтобы служба (2 с) и трей
+        // (3 с), отреагировавшие на одно и то же блокирование, не задвоили
+        // сообщение (их разброс < 3 с). Окно должно быть маленьким, иначе
+        // ПОВТОРНОЕ ПОДКЛЮЧЕНИЕ накопителя в его пределах остаётся без
+        // уведомления (было 30 с - повторное подключение молчало).
+        private static readonly TimeSpan DedupWindow = TimeSpan.FromSeconds(5);
 
         public sealed class BlockEvent
         {
@@ -1689,12 +1695,21 @@ namespace UsbBlockTray
                     if (e.Id > lastId) lastId = e.Id;
 
                 // Дедупликация: то же устройство уже заблокировано недавно
-                // (служба и трей могут снять букву по очереди).
+                // (служба и трей могут снять букву по очереди - надо бы
+                // избавиться от двойного уведомления, но НЕ гасить повторное
+                // подключение накопителя, которое считается новым блокированием).
                 foreach (BlockEvent e in cur)
                 {
                     if (DateTime.Now - e.When < DedupWindow &&
                         SameDevice(e.Serial, e.Label, serial, label))
+                    {
+                        NotifyService.TraceLog("дедупликация при записи: пропуск повторного " +
+                            "уведомления (тот же накопитель, событие было " +
+                            (DateTime.Now - e.When).TotalSeconds.ToString("0", CultureInfo.InvariantCulture) +
+                            " с назад, окно " +
+                            DedupWindow.TotalSeconds.ToString("0", CultureInfo.InvariantCulture) + " с)");
                         return false;
+                    }
                 }
 
                 long newId = lastId + 1;
@@ -3825,7 +3840,7 @@ namespace UsbBlockTray
         public static readonly string TracePath =
             Path.Combine(Path.GetTempPath(), "usb_block_notify.log");
 
-        private static void TraceLog(string message)
+        internal static void TraceLog(string message)
         {
             string line = DateTime.Now.ToString("HH:mm:ss.fff") + " " + message;
             lock (TraceLock)
