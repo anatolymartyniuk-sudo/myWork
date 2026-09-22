@@ -1671,10 +1671,10 @@ namespace UsbBlockTray
         // Окно дедупликации: то же устройство, заблокированное в этом окне,
         // повторно НЕ уведомляется. Нужно ТОЛЬКО чтобы служба (2 с) и трей
         // (3 с), отреагировавшие на одно и то же блокирование, не задвоили
-        // сообщение (их разброс < 3 с). Окно должно быть маленьким, иначе
-        // ПОВТОРНОЕ ПОДКЛЮЧЕНИЕ накопителя в его пределах остаётся без
-        // уведомления (было 30 с - повторное подключение молчало).
-        private static readonly TimeSpan DedupWindow = TimeSpan.FromSeconds(5);
+        // сообщение. Вторая копия может увидеть том лишь пока первая не сняла
+        // букву (доли секунды), поэтому окно 3 с с запасом перекрывает дубль,
+        // но НЕ гасит повторное подключение накопителя (оно физически дольше).
+        private static readonly TimeSpan DedupWindow = TimeSpan.FromSeconds(3);
 
         public sealed class BlockEvent
         {
@@ -1730,6 +1730,8 @@ namespace UsbBlockTray
                     };
                     k.SetValue("E" + ne.Id, FormatValue(ne), RegistryValueKind.String);
                 }
+                NotifyService.TraceLog("записано событие id=" + newId.ToString(CultureInfo.InvariantCulture) +
+                    " (SN=" + serial + ")");
                 return true;
             }
             catch
@@ -4391,7 +4393,9 @@ namespace UsbBlockTray
                 EventSourceStatus());
             sb.AppendLine("Запись в очередь (HKLM\\SOFTWARE\\USB_Block\\Events): " +
                 QueueWriteTest());
-            sb.AppendLine("Лог показа уведомлений (" + NotifyService.TracePath + "):");
+            sb.AppendLine("Лог показа уведомлений (хвост " +
+                Path.GetFileName(NotifyService.TracePath) +
+                " из %TEMP% и Windows\\Temp):");
             sb.AppendLine(NotifyTraceSummary());
 
             sb.AppendLine();
@@ -4536,24 +4540,42 @@ namespace UsbBlockTray
 
         // Хвост лога показа уведомлений (последние строки из
         // %TEMP%\usb_block_notify.log) - видно, доходил ли показ на этой машине
-        // и были ли ошибки. "<пусто>" - лог ещё не создавался.
+        // и были ли ошибки. Дополнительно показывается лог СЛУЖБЫ
+        // (C:\Windows\Temp\usb_block_notify.log): события в общую очередь
+        // пишет в основном служба (SYSTEM), и её след живёт в системном TEMP,
+        // недоступном из %TEMP% пользователя. "<нет лога>" - ещё не создавался.
         private static string NotifyTraceSummary()
         {
-            string path = NotifyService.TracePath;
-            try
+            List<string> paths = new List<string>();
+            paths.Add(NotifyService.TracePath);
+            string sysTrace = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                "Temp", "usb_block_notify.log");
+            if (string.Equals(sysTrace, NotifyService.TracePath,
+                StringComparison.OrdinalIgnoreCase) == false)
+                paths.Add(sysTrace);
+
+            StringBuilder sb = new StringBuilder();
+            bool any = false;
+            foreach (string path in paths)
             {
-                if (!File.Exists(path)) return "  <нет лога - показ ещё не запускался>";
-                string[] lines = File.ReadAllLines(path);
-                int n = Math.Min(lines.Length, 25);
-                StringBuilder sb = new StringBuilder();
-                for (int i = lines.Length - n; i < lines.Length; i++)
-                    sb.AppendLine("  " + lines[i]);
-                return sb.ToString().TrimEnd();
+                if (!File.Exists(path)) continue;
+                any = true;
+                sb.AppendLine("  [" + path + "]");
+                try
+                {
+                    string[] lines = File.ReadAllLines(path);
+                    int n = Math.Min(lines.Length, 25);
+                    for (int i = lines.Length - n; i < lines.Length; i++)
+                        sb.AppendLine("  " + lines[i]);
+                }
+                catch (Exception ex)
+                {
+                    sb.AppendLine("  ошибка чтения: " + ex.Message);
+                }
             }
-            catch (Exception ex)
-            {
-                return "ошибка чтения лога (" + path + "): " + ex.Message;
-            }
+            if (!any) return "  <нет лога - показ ещё не запускался>";
+            return sb.ToString().TrimEnd();
         }
 
         // Статус источника журнала событий, который пишет служба. Если источник
