@@ -115,9 +115,8 @@ namespace UsbBlockTray
 
             if (selftest)
             {
-                File.WriteAllText(
-                    Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "selftest.log"),
-                    "SELFTEST: " + Selftest.Run(), new UTF8Encoding(true));
+                Program.WriteLog("selftest.log",
+                    "SELFTEST: " + Selftest.Run());
                 return 0;
             }
 
@@ -247,6 +246,38 @@ namespace UsbBlockTray
             catch
             {
             }
+        }
+
+        // Куда писать лог-файл программы (diag.log/selftest.log), чтобы он
+        // создавался у ЛЮБОГО пользователя: у администратора - рядом с exe
+        // (папка программы, ей так и пользовались раньше), у обычного
+        // пользователя (например, запуск из защищённой копии в Program Files,
+        // куда писать нельзя) - в %TEMP%. Нужный путь определяется пробной
+        // записью без создания самого файла.
+        public static string PreferredLogPath(string name)
+        {
+            string exeDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, name);
+            try
+            {
+                string probe = exeDir + ".probe_" + Guid.NewGuid().ToString("N");
+                File.WriteAllText(probe, string.Empty);
+                File.Delete(probe);
+                return exeDir;
+            }
+            catch
+            {
+                return Path.Combine(Path.GetTempPath(), name);
+            }
+        }
+
+        // Записывает лог-файл имени name, возвращая фактически
+        // использованный путь.
+        public static string WriteLog(string name, string content)
+        {
+            string p = PreferredLogPath(name);
+            try { File.WriteAllText(p, content, new UTF8Encoding(true)); }
+            catch { }
+            return p;
         }
 
         public static bool IsAdministrator()
@@ -4404,8 +4435,10 @@ namespace UsbBlockTray
                 sb.AppendLine("Ошибка: " + ex.Message);
             }
 
-            string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "diag.log");
-            File.WriteAllText(path, sb.ToString(), new UTF8Encoding(true));
+            string logPath = Program.PreferredLogPath("diag.log");
+            sb.Insert(0,
+                "Файл этого лога: " + logPath + Environment.NewLine);
+            Program.WriteLog("diag.log", sb.ToString());
             return 0;
         }
 
