@@ -45,6 +45,7 @@ namespace UsbBlockTray
             bool service = false;
             bool logon = false;
             bool notify = false;
+            bool testpopup = false;
 
             foreach (string a in args)
             {
@@ -66,6 +67,19 @@ namespace UsbBlockTray
                 if (string.Equals(a, "--notify", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(a, "-notify", StringComparison.OrdinalIgnoreCase))
                     notify = true;
+                if (string.Equals(a, "--testpopup", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(a, "-testpopup", StringComparison.OrdinalIgnoreCase))
+                    testpopup = true;
+            }
+
+            // Самопроверка показа всплывающих сообщений: показывает два окна-
+            // уведомления, чтобы убедиться, что на этой машине и в этой сессии
+            // механизм показа вообще работает (в Window 10 всплывающие окна
+            // создаются как обычные безрамочные окна справа внизу). Запускается
+            // без прав администратора и под ним - показывает окно в обоих случаях.
+            if (testpopup)
+            {
+                return NotifyService.TestPopup();
             }
 
             if (service)
@@ -3754,9 +3768,92 @@ namespace UsbBlockTray
     public static class NotifyService
     {
         private static System.Windows.Forms.Timer _poll;
-        private static readonly Queue<string> _queue = new Queue<string>();
+        private static readonly Queue<QueueItem> _queue = new Queue<QueueItem>();
         private static NotifyPopup _active;
         private static int _topOffset = 0;
+
+        // Последняя ошибка показа (для диагностики). Показ отрабатывает в своём
+        // процессе (трей/уведомитель), поэтому строку видно в diag только если
+        // запустить --diag из живой сессии с тем же кодом - на деле результат
+        // читают из лога-следов (TraceLog), картина сводится там же на машине.
+        public static string LastShowError;
+
+        // Одна запись очереди показа: id события (для NotifyStore.SetLastSeen
+        // ТОЛЬКО после фактического показа) и готовый текст сообщения.
+        private sealed class QueueItem
+        {
+            public long Id;
+            public string Text;
+        }
+
+        // Малый лог-след показа: пишется в %TEMP%\usb_block_notify.log, чтобы
+        // на целевой машине можно было посмотреть, доходил ли показ и не было ли
+        // ошибок. Ведётся усечённый кольцевой лог (последние ~200 строк).
+        private static readonly object TraceLock = new object();
+        private static readonly List<string> TraceLines = new List<string>();
+        public static readonly string TracePath =
+            Path.Combine(Path.GetTempPath(), "usb_block_notify.log");
+
+        private static void TraceLog(string message)
+        {
+            string line = DateTime.Now.ToString("HH:mm:ss.fff") + " " + message;
+            lock (TraceLock)
+            {
+                TraceLines.Add(line);
+                while (TraceLines.Count > 200) TraceLines.RemoveAt(0);
+                try
+                {
+                    using (StreamWriter w = File.AppendText(TracePath))
+                        w.WriteLine(line);
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        // Вернуть хвост лога-следа (для --diag).
+        public static List<string> TraceTail()
+        {
+            lock (TraceLock)
+            {
+                return new List<string>(TraceLines);
+            }
+        }
+
+        // Самопроверка показа: показывает тестовое сообщение (окно без рамки,
+        // справа внизу) и ждёт, пока его закроют или оно закроется само.
+        public static int TestPopup()
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            try
+            {
+                using (NotifyPopup p = new NotifyPopup(
+                    "ТЕСТ уведомления о блокировке.\n\n" + Program.NotifyText +
+                    "\n\nЕсли вы видите это окно в правом нижнем углу экрана, показ работает.",
+                    8000))
+                {
+                    p.ShowInTaskbar = false;
+                    Application.Run(p);
+                }
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                string msg = "Не удалось показать тестовое уведомление: " + ex.Message;
+                TraceLog(msg);
+                try
+                {
+                    MessageBox.Show(msg, Program.Title,
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                catch
+                {
+                }
+                return 1;
+            }
+        }
 
         public static void Run()
         {
@@ -3796,6 +3893,11 @@ namespace UsbBlockTray
         // Прочитать очередь и показать новые события. Вызывается треем
         // (пока он жив) и уведомителем (после выгрузки трея). Внутри одного
         // процесса состояние (_queue/_active) своё, поэтому дублей нет.
+        // ВАЖНО: счётчик просмотренных событий (LastEventId) продвигается
+        // ТОЛЬКО когда окно реально показано (см. Displayed у NotifyPopup).
+        // Раньше SetLastSeen вызывался до ShowNext, и если создание/показ окна
+        // падал, событие "съедалось" без показа и терялось навсегда - на
+        // Windows 10 сообщения о блокировках не приходили никому.
         public static void PollCore()
         {
             List<NotifyStore.BlockEvent> evs = NotifyStore.ReadAll();
@@ -3808,9 +3910,11 @@ namespace UsbBlockTray
 
             foreach (NotifyStore.BlockEvent e in evs)
             {
-                if (e.Id > last) _queue.Enqueue(BuildText(e));
+                if (e.Id > last) _queue.Enqueue(new QueueItem { Id = e.Id, Text = BuildText(e) });
             }
-            NotifyStore.SetLastSeen(max);
+            TraceLog("в очереди показа " + _queue.Count +
+                ", новых с id>" + last.ToString(CultureInfo.InvariantCulture) +
+                " до " + max.ToString(CultureInfo.InvariantCulture));
 
             if (_active == null)
             {
@@ -3825,18 +3929,56 @@ namespace UsbBlockTray
                 _topOffset = 0;
                 return;
             }
-            string text = _queue.Dequeue();
-            _active = new NotifyPopup(text);
-            _active.TopOffset = _topOffset;
-            _topOffset += _active.ExpectedHeight + 8;
+            QueueItem item = _queue.Peek();
+            NotifyPopup p = null;
+            try
+            {
+                p = new NotifyPopup(item.Text);
+            }
+            catch (Exception ex)
+            {
+                // Окно не создалось (например, нет контекста рабочего стола).
+                // Событие ОСТАЁТСЯ в очереди и будет повторено на следующем
+                // такте (LastEventId не продвинут - ничего не теряется).
+                LastShowError = ex.Message;
+                TraceLog("ОШИБКА создания окна: " + ex.Message);
+                return;
+            }
+            _queue.Dequeue();
+
+            p.NotificationId = item.Id;
+            p.TopOffset = _topOffset;
+            _topOffset += p.ExpectedHeight + 8;
             if (_topOffset > (Screen.PrimaryScreen.WorkingArea.Height - 120))
                 _topOffset = 0;
-            _active.FormClosed += delegate
+
+            // Счётчик продвигается ТОЛЬКО когда окно фактически показано.
+            p.Displayed += delegate(long shownId)
+            {
+                NotifyStore.SetLastSeen(shownId);
+                LastShowError = null;
+                TraceLog("показано уведомление id=" +
+                    shownId.ToString(CultureInfo.InvariantCulture));
+            };
+            p.FormClosed += delegate
             {
                 _active = null;
                 ShowNext();
             };
-            _active.Show();
+            _active = p;
+            try
+            {
+                TraceLog("показ id=" + item.Id.ToString(CultureInfo.InvariantCulture));
+                p.Show();
+            }
+            catch (Exception ex)
+            {
+                LastShowError = ex.Message;
+                TraceLog("ОШИБКА показа: " + ex.Message);
+                _active = null;
+                try { p.Dispose(); }
+                catch { }
+            }
         }
 
         private static string BuildText(NotifyStore.BlockEvent e)
@@ -3857,12 +3999,22 @@ namespace UsbBlockTray
         private readonly Size _textSize;
         public int TopOffset = 0;
 
+        // Id события, которое показывает это окно (устанавливает NotifyService).
+        // -1 = тестовое окно, счётчик просмотренных событий не продвигается.
+        public long NotificationId = -1;
+
+        // Срабатывает, когда окно фактически показано (для NotifyService это
+        // сигнал "событие id донесено до экрана" - только тогда продвигается
+        // NotifyStore.SetLastSeen). Для тестового окна (NotificationId=-1)
+        // событие не вызывается.
+        public event Action<long> Displayed;
+
         public int ExpectedHeight
         {
             get { return _textSize.Height + 32; }
         }
 
-        public NotifyPopup(string text)
+        public NotifyPopup(string text, int closeMs = 6000)
         {
             this.FormBorderStyle = FormBorderStyle.None;
             this.StartPosition = FormStartPosition.Manual;
@@ -3888,7 +4040,7 @@ namespace UsbBlockTray
             _lbl.Click += delegate { CloseSelf(); };
 
             _close = new System.Windows.Forms.Timer();
-            _close.Interval = 6000;
+            _close.Interval = closeMs;
             _close.Tick += delegate { CloseSelf(); };
         }
 
@@ -3900,6 +4052,13 @@ namespace UsbBlockTray
             this.Location = new Point(wa.Right - this.Width - 12,
                 wa.Bottom - this.Height - 12 - TopOffset);
             _close.Start();
+
+            Action<long> shown = Displayed;
+            if (shown != null && NotificationId >= 0)
+            {
+                try { shown(NotificationId); }
+                catch { }
+            }
         }
 
         private void CloseSelf()
@@ -4153,6 +4312,8 @@ namespace UsbBlockTray
                 EventSourceStatus());
             sb.AppendLine("Запись в очередь (HKLM\\SOFTWARE\\USB_Block\\Events): " +
                 QueueWriteTest());
+            sb.AppendLine("Лог показа уведомлений (" + NotifyService.TracePath + "):");
+            sb.AppendLine(NotifyTraceSummary());
 
             sb.AppendLine();
             sb.AppendLine("--- Политика ---");
@@ -4289,6 +4450,28 @@ namespace UsbBlockTray
             catch (Exception ex)
             {
                 return "ошибка чтения: " + ex.Message;
+            }
+        }
+
+        // Хвост лога показа уведомлений (последние строки из
+        // %TEMP%\usb_block_notify.log) - видно, доходил ли показ на этой машине
+        // и были ли ошибки. "<пусто>" - лог ещё не создавался.
+        private static string NotifyTraceSummary()
+        {
+            string path = NotifyService.TracePath;
+            try
+            {
+                if (!File.Exists(path)) return "  <нет лога - показ ещё не запускался>";
+                string[] lines = File.ReadAllLines(path);
+                int n = Math.Min(lines.Length, 25);
+                StringBuilder sb = new StringBuilder();
+                for (int i = lines.Length - n; i < lines.Length; i++)
+                    sb.AppendLine("  " + lines[i]);
+                return sb.ToString().TrimEnd();
+            }
+            catch (Exception ex)
+            {
+                return "ошибка чтения лога (" + path + "): " + ex.Message;
             }
         }
 
