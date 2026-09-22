@@ -1,12 +1,14 @@
 ﻿USB_Block tray - диагностика
-Время: 09/21/2026 15:44:52
+Время: 09/21/2026 17:42:21
 Администратор: False
 Защищённая копия: C:\Program Files\USB_Block\usb_block_tray.exe  существует=True
 Служба мониторинга: не установлена
 Задача трея (--logon): нет
 Задача уведомителя (--notify): нет
 Процесс-уведомитель: не найден
-Событие блокировки (очередь): записей=0, макс.id=0, LastEventId(HKCU)=0
+Событие блокировки (очередь): записей=1, макс.id=1, LastEventId(HKCU)=1
+Источник журнала событий (UsbBlockMonitor): не удалось определить (Источник не найден, но не удалось выполнить поиск по нескольким или всем журналам событий.  Недоступные журналы: Security, State.)
+Запись в очередь (HKLM\SOFTWARE\USB_Block\Events): НЕТ (Отказано в доступе к разделу реестра "HKEY_LOCAL_MACHINE\SOFTWARE\USB_Block\Events".)
 
 --- Политика ---
 Блокировка активна: False
@@ -16,17 +18,13 @@
 Ошибка чтения (ожидаемо без прав администратора): Отказано в доступе по пути "C:\ProgramData\USB_Block\whitelist.dat".
 
 --- USB-диски (подключённые) ---
-Найдено: 1
-  INST=USBSTOR\DISK&VEN_JETFLASH&PROD_TRANSCEND_8GB&REV_1100\081NS9HV47JMZLUQ&0
-      MODEL=JetFlash Transcend 8GB USB Device  USB=USB\VID_8564&PID_1000  SN=081NS9HV47JMZLUQ  DISKID=USBSTOR\DiskJetFlashTranscend_8GB___1100
+Найдено: 0
 
 --- Смонтированные тома USB (точки монтирования) ---
-Найдено: 1
-  LETTER=G  USB=USB\VID_8564&PID_1000  SN=081NS9HV47JMZLUQ  MODEL=JetFlash Transcend 8GB USB Device
+Найдено: 0
 
 --- USB-узлы массовой памяти ---
-Найдено: 1
-  INST=USB\VID_8564&PID_1000\081NS9HV47JMZLUQ  PRESENT=True  VIDPID=USB\VID_8564&PID_1000  SN=081NS9HV47JMZLUQ  DISABLED=False
+Найдено: 0
 
 --- Все масс-сторадж узлы (реестр) ---
 Найдено: 16

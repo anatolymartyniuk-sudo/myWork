@@ -25,6 +25,11 @@ namespace UsbBlockTray
         private const string MutexName = @"Local\UsbBlockTray_SingleInstance_v2";
         private const string NotifyMutexName = @"Local\UsbBlockNotify_SingleInstance_v2";
 
+        // Имя мьютекса трея нужно уведомителю: пока трей жив (держит мьютекс),
+        // всплывающие сообщения показывает сам трей, а отдельный процесс-
+        // уведомитель включается только после выгрузки трея.
+        public const string TrayMutexName = MutexName;
+
         public static readonly string Title = "USB-блокировка";
 
         // Сообщение при блокировке постороннего накопителя (обязательный текст)
@@ -1851,14 +1856,19 @@ namespace UsbBlockTray
                 foreach (UsbVolume v in volumes)
                 {
                     if (IsVolumeAllowed(v, wl)) continue;
-                    if (MountUtil.Unmount(v))
+                    MountUtil.Unmount(v);
+                    // Уведомляем о постороннем накопителе НЕЗАВИСИМО от кода
+                    // возврата mountvol: снять букву могла уже другая копия
+                    // (служба и трей работают параллельно), но сообщение
+                    // пользователю всё равно нужно. Успешно снятый том
+                    // исчезает из GetUsbVolumes и больше сюда не попадает,
+                    // а повторные срабатывания для неубранного тома гасит
+                    // дедупликация в NotifyStore.Write (окно 30 с).
+                    newly.Add(new BlockedDevice
                     {
-                        newly.Add(new BlockedDevice
-                        {
-                            Label = string.IsNullOrEmpty(v.Model) ? v.UsbId : v.Model,
-                            Serial = v.Serial
-                        });
-                    }
+                        Label = string.IsNullOrEmpty(v.Model) ? v.UsbId : v.Model,
+                        Serial = v.Serial
+                    });
                 }
             }
 
@@ -3647,17 +3657,26 @@ namespace UsbBlockTray
             }
         }
 
-        // Тик фонового таймера: активная блокировка (только под
-        // администратором). УВЕДОМЛЕНИЙ трей больше не показывает - ими
-        // занимается отдельный процесс NotifyService (запуск через задачу
-        // при входе), который живёт независимо от трея, поэтому после
-        // "Выход" из трея сообщения о блокировках продолжают приходить.
+        // Тик фонового таймера: показ уведомлений о блокировках и (под
+        // администратором) активная блокировка. Уведомления показывает сам
+        // трей - это процесс, который гарантированно работает в сессии
+        // пользователя (значок в трее). Отдельный процесс NotifyService
+        // запускается задачей при входе и подхватывает показ, если трей
+        // выгружен кнопкой "Выход" - тогда сообщения продолжают приходить.
         private void TickScan()
         {
             if (_busy) return;
             _busy = true;
             try
             {
+                // Пока трей жив, всплывающие сообщения о блокировках показывает
+                // он сам (это гарантированно работающий в сессии пользователя
+                // процесс). Отдельный уведомитель подхватит показ только после
+                // выгрузки трея. Показ изолирован: его сбой не должен мешать
+                // блокировке ниже.
+                try { NotifyService.PollCore(); }
+                catch { }
+
                 if (Program.IsAdministrator())
                 {
                     RunScan();
@@ -3750,6 +3769,34 @@ namespace UsbBlockTray
         }
 
         private static void Poll()
+        {
+            // Пока трей жив (держит свой мьютекс), сообщения показывает он
+            // сам - здесь ничего не делаем, чтобы не было дублей. Уведомитель
+            // "просыпается" только после выгрузки трея ("Выход" или закрытие).
+            if (TrayAlive()) return;
+            PollCore();
+        }
+
+        // Жив ли сейчас трей этой сессии (по его мьютексу).
+        public static bool TrayAlive()
+        {
+            try
+            {
+                using (Mutex m = Mutex.OpenExisting(Program.TrayMutexName))
+                {
+                    return true;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // Прочитать очередь и показать новые события. Вызывается треем
+        // (пока он жив) и уведомителем (после выгрузки трея). Внутри одного
+        // процесса состояние (_queue/_active) своё, поэтому дублей нет.
+        public static void PollCore()
         {
             List<NotifyStore.BlockEvent> evs = NotifyStore.ReadAll();
             if (evs.Count == 0) return;
@@ -4046,15 +4093,28 @@ namespace UsbBlockTray
                 List<BlockedDevice> newly = UsbMonitor.Scan(out nodes, out disks);
                 foreach (BlockedDevice b in newly)
                 {
-                    string what = string.IsNullOrEmpty(b.Label) ? b.Serial : b.Label;
-                    EventLog.WriteEntry(ServiceManager.ServiceName,
-                        Program.NotifyText + "\n\nЗаблокирован накопитель: " + what +
-                        (string.IsNullOrEmpty(b.Serial) ? string.Empty : "  SN=" + b.Serial),
-                        EventLogEntryType.Warning);
-
-                    // Событие в общую очередь (HKLM): треи всех пользователей
-                    // подхватят и покажут уведомление.
+                    // ВАЖНО: сначала пишем событие в общую очередь (HKLM),
+                    // которую читают треи/уведомители пользователей. Запись в
+                    // журнал событий идёт ПОСЛЕ и в отдельном try/catch: если
+                    // источник журнала не зарегистрирован (WMI-установка
+                    // службы его не создаёт), WriteEntry бросает исключение -
+                    // раньше это прерывало цикл и уведомление НЕ попадало в
+                    // очередь вообще.
                     NotifyStore.Write(b.Serial, b.Label);
+
+                    try
+                    {
+                        string what = string.IsNullOrEmpty(b.Label) ? b.Serial : b.Label;
+                        EventLog.WriteEntry(ServiceManager.ServiceName,
+                            Program.NotifyText + "\n\nЗаблокирован накопитель: " + what +
+                            (string.IsNullOrEmpty(b.Serial) ? string.Empty : "  SN=" + b.Serial),
+                            EventLogEntryType.Warning);
+                    }
+                    catch
+                    {
+                        // Журнал событий недоступен - не критично, уведомление
+                        // уже поставлено в очередь выше.
+                    }
                 }
             }
             catch
@@ -4089,6 +4149,10 @@ namespace UsbBlockTray
             sb.AppendLine("Процесс-уведомитель: " +
                 (NotifyRunning() ? "работает" : "не найден"));
             sb.AppendLine("Событие блокировки (очередь): " + EventsSummary());
+            sb.AppendLine("Источник журнала событий (" + ServiceManager.ServiceName + "): " +
+                EventSourceStatus());
+            sb.AppendLine("Запись в очередь (HKLM\\SOFTWARE\\USB_Block\\Events): " +
+                QueueWriteTest());
 
             sb.AppendLine();
             sb.AppendLine("--- Политика ---");
@@ -4225,6 +4289,43 @@ namespace UsbBlockTray
             catch (Exception ex)
             {
                 return "ошибка чтения: " + ex.Message;
+            }
+        }
+
+        // Статус источника журнала событий, который пишет служба. Если источник
+        // не зарегистрирован, EventLog.WriteEntry у службы может падать (для
+        // этой проверки нужны права на чтение всех журналов).
+        private static string EventSourceStatus()
+        {
+            try
+            {
+                return System.Diagnostics.EventLog.SourceExists(ServiceManager.ServiceName)
+                    ? "зарегистрирован" : "НЕ зарегистрирован";
+            }
+            catch (Exception ex)
+            {
+                return "не удалось определить (" + ex.Message + ")";
+            }
+        }
+
+        // Проверка прав на запись в общую очередь: создаём и сразу удаляем
+        // служебное значение в подразделе Events (само событие не пишем,
+        // чтобы не показывать ложных уведомлений).
+        private static string QueueWriteTest()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.CreateSubKey(
+                    @"SOFTWARE\USB_Block\Events"))
+                {
+                    k.SetValue("__diag_test", "0|0||", RegistryValueKind.String);
+                    k.DeleteValue("__diag_test", false);
+                }
+                return "ОК";
+            }
+            catch (Exception ex)
+            {
+                return "НЕТ (" + ex.Message + ")";
             }
         }
     }
