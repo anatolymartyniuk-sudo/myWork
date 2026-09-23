@@ -1,1 +1,1 @@
-﻿SELFTEST: Plain export/import: OK | Encrypted export/import: OK | Wrong password rejected: OK | Encrypted file is binary (no text): OK | Payload serialize/deserialize: OK | Volume map (disk->partition->letter): OK (томов: 2) | Merge whitelists (dedup): OK (записей: 3) | 
+﻿SELFTEST: Export/import: OK | Payload serialize/deserialize: OK | Volume map (disk->partition->letter): OK (томов: 2) | Merge whitelists (dedup): OK (записей: 3) | 

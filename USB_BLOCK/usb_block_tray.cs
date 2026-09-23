@@ -588,62 +588,28 @@ namespace UsbBlockTray
 
     // =====================================================================
     // Перенос whitelist между компьютерами: файл .wlb
-    // - "USBWL" (ver 2): без пароля, бинарный (не текст)
-    // - "USBWE" (ver 1): AES-256 + пароль (PBKDF2 + HMAC-SHA256)
+    // "USBWL" (ver 2): бинарный (не текст), без пароля.
+    // Старые зашифрованные файлы "USBWE" (AES-256 + пароль) больше
+    // не поддерживаются - парольная защита экспорта/импорта удалена.
     // =====================================================================
     public static class PortableWhitelist
     {
         private static readonly byte[] MagicPlain = { (byte)'U', (byte)'S', (byte)'B', (byte)'W', (byte)'L' };
         private static readonly byte[] MagicEnc = { (byte)'U', (byte)'S', (byte)'B', (byte)'W', (byte)'E' };
-        private const int Iterations = 20000;
 
-        public static void Export(List<DeviceEntry> list, string path, string password)
+        public static void Export(List<DeviceEntry> list, string path)
         {
             byte[] payload = WhitelistStore.SerializePayload(list);
-
-            if (string.IsNullOrEmpty(password))
+            using (FileStream fs = new FileStream(path, FileMode.Create))
+            using (BinaryWriter bw = new BinaryWriter(fs))
             {
-                using (FileStream fs = new FileStream(path, FileMode.Create))
-                using (BinaryWriter bw = new BinaryWriter(fs))
-                {
-                    bw.Write(MagicPlain);
-                    bw.Write(payload.Length);
-                    bw.Write(payload);
-                }
-                return;
-            }
-
-            using (RNGCryptoServiceProvider rng = new RNGCryptoServiceProvider())
-            {
-                byte[] salt = new byte[16];
-                byte[] iv = new byte[16];
-                rng.GetBytes(salt);
-                rng.GetBytes(iv);
-
-                byte[] keyMaterial = DeriveKey(password, salt, 48);
-                byte[] aesKey = new byte[32];
-                byte[] macKey = new byte[16];
-                Array.Copy(keyMaterial, 0, aesKey, 0, 32);
-                Array.Copy(keyMaterial, 32, macKey, 0, 16);
-
-                byte[] ct = AesEncrypt(aesKey, iv, payload);
-                byte[] mac = ComputeMac(macKey, salt, iv, ct);
-
-                using (FileStream fs = new FileStream(path, FileMode.Create))
-                using (BinaryWriter bw = new BinaryWriter(fs))
-                {
-                    bw.Write(MagicEnc);
-                    bw.Write(Iterations);
-                    bw.Write(salt);
-                    bw.Write(iv);
-                    bw.Write(mac);
-                    bw.Write(ct.Length);
-                    bw.Write(ct);
-                }
+                bw.Write(MagicPlain);
+                bw.Write(payload.Length);
+                bw.Write(payload);
             }
         }
 
-        public static List<DeviceEntry> Import(string path, string password)
+        public static List<DeviceEntry> Import(string path)
         {
             byte[] file = File.ReadAllBytes(path);
             if (file.Length < 8) throw new InvalidDataException("файл слишком мал");
@@ -661,98 +627,11 @@ namespace UsbBlockTray
             }
 
             if (HasMagic(file, MagicEnc))
-            {
-                using (MemoryStream ms = new MemoryStream(file))
-                using (BinaryReader br = new BinaryReader(ms))
-                {
-                    br.ReadBytes(MagicEnc.Length);
-                    int iter = br.ReadInt32();
-                    byte[] salt = br.ReadBytes(16);
-                    byte[] iv = br.ReadBytes(16);
-                    byte[] mac = br.ReadBytes(32);
-                    int ctLen = br.ReadInt32();
-                    byte[] ct = br.ReadBytes(ctLen);
-
-                    if (string.IsNullOrEmpty(password))
-                        throw new UnauthorizedAccessException("файл защищён паролем - введите пароль");
-
-                    byte[] keyMaterial = DeriveKey(password, salt, 48);
-                    byte[] aesKey = new byte[32];
-                    byte[] macKey = new byte[16];
-                    Array.Copy(keyMaterial, 0, aesKey, 0, 32);
-                    Array.Copy(keyMaterial, 32, macKey, 0, 16);
-
-                    byte[] expected = ComputeMac(macKey, salt, iv, ct);
-                    if (!ConstantEquals(expected, mac))
-                        throw new UnauthorizedAccessException("неверный пароль или файл повреждён");
-
-                    byte[] payload = AesDecrypt(aesKey, iv, ct);
-                    return WhitelistStore.DeserializePayload(payload);
-                }
-            }
+                throw new InvalidDataException(
+                    "файл защищён паролем - парольная защита удалена; " +
+                    "экспортируйте whitelist заново со старого компьютера");
 
             throw new InvalidDataException("неизвестный формат файла whitelist");
-        }
-
-        private static byte[] DeriveKey(string password, byte[] salt, int length)
-        {
-            using (Rfc2898DeriveBytes pbkdf2 = new Rfc2898DeriveBytes(password, salt, Iterations))
-            {
-                return pbkdf2.GetBytes(length);
-            }
-        }
-
-        private static byte[] AesEncrypt(byte[] key, byte[] iv, byte[] data)
-        {
-            using (Aes aes = new AesManaged())
-            {
-                aes.Key = key;
-                aes.IV = iv;
-                aes.Mode = CipherMode.CBC;
-                aes.Padding = PaddingMode.PKCS7;
-                using (ICryptoTransform enc = aes.CreateEncryptor())
-                using (MemoryStream ms = new MemoryStream())
-                using (CryptoStream cs = new CryptoStream(ms, enc, CryptoStreamMode.Write))
-                {
-                    cs.Write(data, 0, data.Length);
-                    cs.FlushFinalBlock();
-                    return ms.ToArray();
-                }
-            }
-        }
-
-        private static byte[] AesDecrypt(byte[] key, byte[] iv, byte[] ct)
-        {
-            using (Aes aes = new AesManaged())
-            {
-                aes.Key = key;
-                aes.IV = iv;
-                aes.Mode = CipherMode.CBC;
-                aes.Padding = PaddingMode.PKCS7;
-                using (ICryptoTransform dec = aes.CreateDecryptor())
-                using (MemoryStream ms = new MemoryStream(ct))
-                using (CryptoStream cs = new CryptoStream(ms, dec, CryptoStreamMode.Read))
-                using (MemoryStream outMs = new MemoryStream())
-                {
-                    cs.CopyTo(outMs);
-                    return outMs.ToArray();
-                }
-            }
-        }
-
-        private static byte[] ComputeMac(byte[] macKey, byte[] salt, byte[] iv, byte[] ct)
-        {
-            using (MemoryStream ms = new MemoryStream())
-            {
-                ms.Write(salt, 0, salt.Length);
-                ms.Write(iv, 0, iv.Length);
-                ms.Write(ct, 0, ct.Length);
-                byte[] data = ms.ToArray();
-                using (HMACSHA256 hmac = new HMACSHA256(macKey))
-                {
-                    return hmac.ComputeHash(data);
-                }
-            }
         }
 
         private static bool HasMagic(byte[] file, byte[] magic)
@@ -761,15 +640,6 @@ namespace UsbBlockTray
             for (int i = 0; i < magic.Length; i++)
                 if (file[i] != magic[i]) return false;
             return true;
-        }
-
-        private static bool ConstantEquals(byte[] a, byte[] b)
-        {
-            if (a == null || b == null || a.Length != b.Length) return false;
-            int diff = 0;
-            for (int i = 0; i < a.Length; i++)
-                diff |= a[i] ^ b[i];
-            return diff == 0;
         }
     }
 
@@ -2014,7 +1884,7 @@ namespace UsbBlockTray
                     // Диск, которому только что сняли букву, НЕ должен тут же
                     // попасть в список "без буквы" и задвоить уведомление.
                     string vkey = DiskKey(v.DiskId, v.UsbId, v.Serial);
-                    if (vkey != null) _reportedLetterless.Add(vkey);
+                    if (vkey != null) AddReportedLetterless(vkey);
                 }
 
                 // Посторонние USB-диски БЕЗ БУКВЫ (в т.ч. "вставленные при
@@ -2027,12 +1897,59 @@ namespace UsbBlockTray
             return newly;
         }
 
-        // Отслеживание уже уведомлённых дисков без буквы (per-процесс):
-        // повторного спама раз в 2 с нет, а каждый НОВЫЙ физический
-        // подключаемый даёт своё уведомление. Сбрасывается перезапуском
-        // процесса (т.е. следующим входом/перезагрузкой) - как надо.
-        private static readonly HashSet<string> _reportedLetterless =
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Отслеживание уже уведомлённых дисков без буквы. Хранится в реестре
+        // (HKLM\SOFTWARE\USB_Block\ReportedLetterless), а не в памяти процесса:
+        // при логоне служба и трей - это разные процессы, и при входе новый
+        // трей не должен повторно писать событие о уже присутствующем диске.
+        // Каждое НОВОЕ физическое подключение снова даёт своё уведомление
+        // (маркер удаляется, как только диск исчез из системы).
+        private const string LetterlessKey = @"SOFTWARE\USB_Block\ReportedLetterless";
+
+        private static HashSet<string> LoadReportedLetterless()
+        {
+            HashSet<string> set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(LetterlessKey, false))
+                {
+                    if (k == null) return set;
+                    string[] arr = k.GetValue("Keys") as string[];
+                    if (arr != null)
+                        foreach (string s in arr)
+                            if (!string.IsNullOrEmpty(s)) set.Add(s);
+                }
+            }
+            catch { }
+            return set;
+        }
+
+        private static void SaveReportedLetterless(HashSet<string> set)
+        {
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.CreateSubKey(LetterlessKey))
+                {
+                    if (set == null || set.Count == 0)
+                    {
+                        k.DeleteValue("Keys", false);
+                    }
+                    else
+                    {
+                        string[] arr = new string[set.Count];
+                        set.CopyTo(arr);
+                        k.SetValue("Keys", arr, RegistryValueKind.MultiString);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static void AddReportedLetterless(string key)
+        {
+            if (key == null) return;
+            HashSet<string> set = LoadReportedLetterless();
+            if (set.Add(key)) SaveReportedLetterless(set);
+        }
 
         private static string DiskKey(string diskId, string usbId, string serial)
         {
@@ -2073,6 +1990,8 @@ namespace UsbBlockTray
             List<BlockedDevice> newly, List<DeviceEntry> wl, List<StorageDevice> disks)
         {
             if (wl == null) return;
+            HashSet<string> reported = LoadReportedLetterless();
+            bool changed = false;
             List<StorageDevice> letterless = UsbQuery.GetUsbDisksWithNoLetter(disks);
             HashSet<string> present = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (StorageDevice d in letterless)
@@ -2081,19 +2000,24 @@ namespace UsbBlockTray
                 if (key == null) continue;
                 present.Add(key);
                 if (IsDiskAllowed(d, wl)) continue;
-                if (_reportedLetterless.Contains(key)) continue;
-                _reportedLetterless.Add(key);
+                if (reported.Contains(key)) continue;
+                reported.Add(key);
+                changed = true;
                 newly.Add(new BlockedDevice
                 {
                     Label = string.IsNullOrEmpty(d.Model) ? d.UsbId : d.Model,
                     Serial = d.Serial
                 });
             }
-            if (_reportedLetterless.Count == 0) return;
             List<string> gone = new List<string>();
-            foreach (string k in _reportedLetterless)
+            foreach (string k in reported)
                 if (!present.Contains(k)) gone.Add(k);
-            foreach (string k in gone) _reportedLetterless.Remove(k);
+            if (gone.Count > 0)
+            {
+                foreach (string k in gone) reported.Remove(k);
+                changed = true;
+            }
+            if (changed) SaveReportedLetterless(reported);
         }
 
         // Соответствует ли том разрешённому устройству из whitelist
@@ -2279,73 +2203,6 @@ namespace UsbBlockTray
     // =====================================================================
     // Простые диалоги
     // =====================================================================
-    public sealed class PasswordPromptForm : Form
-    {
-        private readonly TextBox _tb;
-        public string Password { get; private set; }
-
-        public PasswordPromptForm(string caption, string prompt, bool allowEmpty)
-        {
-            this.Text = caption;
-            this.StartPosition = FormStartPosition.CenterScreen;
-            this.FormBorderStyle = FormBorderStyle.FixedDialog;
-            this.MaximizeBox = false;
-            this.MinimizeBox = false;
-            this.ClientSize = new Size(400, 150);
-            this.Font = new Font("Segoe UI", 9f);
-
-            Label lbl = new Label();
-            lbl.Text = prompt;
-            lbl.AutoSize = true;
-            lbl.Location = new Point(12, 10);
-            lbl.MaximumSize = new Size(376, 50);
-
-            _tb = new TextBox();
-            _tb.UseSystemPasswordChar = true;
-            _tb.SetBounds(12, 62, 376, 46);
-
-            Button ok = new Button();
-            ok.Text = "OK";
-            ok.Size = new Size(95, 28);
-            ok.Location = new Point(180, 112);
-            ok.Click += delegate
-            {
-                Password = _tb.Text;
-                this.DialogResult = DialogResult.OK;
-                this.Close();
-            };
-
-            Button cancel = new Button();
-            cancel.Text = "Отмена";
-            cancel.Size = new Size(95, 28);
-            cancel.Location = new Point(283, 112);
-            cancel.DialogResult = DialogResult.Cancel;
-
-            if (allowEmpty)
-            {
-                CheckBox ck = new CheckBox();
-                ck.Text = "Без пароля";
-                ck.Checked = false;
-                ck.AutoSize = true;
-                ck.Location = new Point(210, 66);
-                ck.CheckedChanged += delegate
-                {
-                    _tb.Enabled = !ck.Checked;
-                    if (ck.Checked) { _tb.Text = string.Empty; _tb.Enabled = false; }
-                    else _tb.Enabled = true;
-                };
-                this.Controls.Add(ck);
-            }
-
-            this.Controls.Add(lbl);
-            this.Controls.Add(_tb);
-            this.Controls.Add(ok);
-            this.Controls.Add(cancel);
-            this.CancelButton = cancel;
-            this.AcceptButton = ok;
-        }
-    }
-
     public sealed class AddDeviceForm : Form
     {
         private readonly List<StorageDevice> _devices;
@@ -2655,43 +2512,71 @@ namespace UsbBlockTray
             this.CancelButton = close;
         }
 
-        // Метка (имя) тома показывается из файловой системы, если накопитель
-        // сейчас подключён; иначе - сохранённое при добавлении имя устройства.
-        // Показываются три поля записи whitelist:
-        //   Ім'я Пристрою (задаёт пользователь),
-        //   Тип Пристрою (ID) - USB-идентификатор,
-        //   Модель Пристрою (Vendor ID) - HardwareID диска USBSTOR.
+        // Читаемый вид записи whitelist - только три поля:
+        //   Метка тома (из файловой системы, если накопитель подключён),
+        //   Модель накопителя (WMI-модель, если подключён; иначе читается из DiskId),
+        //   Дата добавления в whitelist.
         private static string FormatEntry(DeviceEntry e,
             Dictionary<string, UsbVolume> connected,
             Dictionary<string, string> volumeLabels)
         {
             StringBuilder sb = new StringBuilder();
-            sb.Append("Ім'я Пристрою: " + (string.IsNullOrEmpty(e.Name) ? "(не задано)" : e.Name));
-            sb.Append("\r\nТип Пристрою (ID): " + (string.IsNullOrEmpty(e.UsbId) ? "(нет)" : e.UsbId));
-            sb.Append("\r\nМодель Пристрою (Vendor ID): " + (string.IsNullOrEmpty(e.DiskId) ? "(нет)" : e.DiskId));
-            sb.Append("\r\nSN: " + (string.IsNullOrEmpty(e.Serial) ? "(нет)" : e.Serial));
 
             string key = (e.UsbId ?? string.Empty) + "|" + (e.Serial ?? string.Empty);
             UsbVolume v;
-            string label;
+            string label = null;
+            string model = null;
             if (connected != null && volumeLabels != null &&
                 connected.TryGetValue(key, out v) &&
                 volumeLabels.TryGetValue(v.DriveLetter, out label))
             {
-                sb.Append("\r\nМетка (ім'я) тома: \"" +
-                    (string.IsNullOrEmpty(label) ? "(без метки)" : label) +
-                    "\"    подключён: " + v.DriveLetter + ":");
+                label = string.IsNullOrEmpty(label) ? "(без метки)" : label;
+                model = string.IsNullOrEmpty(v.Model) ? null : v.Model;
             }
-            else
-            {
-                sb.Append("\r\nМетка (ім'я) тома: (устройство не подключено)");
-            }
+            if (label == null)
+                label = string.IsNullOrEmpty(e.Name) ? "(не подключено)" : e.Name;
 
+            sb.Append("Метка тома: \"" + label + "\"");
+            sb.Append("\r\nМодель накопителя: " +
+                (string.IsNullOrEmpty(model) ? ReadableModel(e.DiskId) : model));
             if (e.AddedAt != default(DateTime))
                 sb.Append("\r\nДобавлен: " +
                     e.AddedAt.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture));
 
             return sb.ToString();
+        }
+
+        // Читаемая модель из HardwareID диска USBSTOR, e.g.
+        //   "USBSTOR\Disk&Ven_&Prod_Transcend_8GB&Rev_1100"  ->  "Transcend 8GB"
+        //   "USBSTOR\DiskJetFlashTranscend_8GB___1100"        ->  "JetFlashTranscend 8GB"
+        private static string ReadableModel(string diskId)
+        {
+            if (string.IsNullOrEmpty(diskId)) return "(нет)";
+            const string prefix = "USBSTOR\\Disk";
+            string m = diskId.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                ? diskId.Substring(prefix.Length) : diskId;
+
+            int p = m.IndexOf("&Prod_", StringComparison.OrdinalIgnoreCase);
+            if (p >= 0)
+            {
+                int end = m.IndexOf('&', p + 6);
+                m = end < 0 ? m.Substring(p + 6) : m.Substring(p + 6, end - p - 6);
+            }
+            else
+            {
+                int r = m.IndexOf("&Rev_", StringComparison.OrdinalIgnoreCase);
+                if (r >= 0) m = m.Substring(0, r);
+                int u = m.LastIndexOf('_');
+                if (u > 0)
+                {
+                    string tail = m.Substring(u + 1);
+                    bool digits = tail.Length >= 1 && tail.Length <= 6;
+                    foreach (char c in tail) if (!char.IsDigit(c)) { digits = false; break; }
+                    if (digits) m = m.Substring(0, u);
+                }
+            }
+
+            return m.Replace('_', ' ').Trim();
         }
     }
 
@@ -3462,26 +3347,19 @@ namespace UsbBlockTray
                 dlg.DefaultExt = "wlb";
                 if (dlg.ShowDialog() != DialogResult.OK) return;
 
-                using (PasswordPromptForm pf = new PasswordPromptForm(
-                    "Защита паролем",
-                    "Пароль для файла переноса (пусто - без пароля):",
-                    true))
+                try
                 {
-                    if (pf.ShowDialog() != DialogResult.OK) return;
-                    try
-                    {
-                        PortableWhitelist.Export(
-                            UsbMonitor.GetWhitelist(), dlg.FileName, pf.Password);
-                        MessageBox.Show(
-                            "Whitelist экспортирован:\n" + dlg.FileName +
-                            "\n\nПеренесите .wlb на другой компьютер и выберите «Импортировать whitelist».",
-                            Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    }
-                    catch (Exception ex)
-                    {
-                        MessageBox.Show("Ошибка экспорта:\n" + ex.Message,
-                            Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    }
+                    PortableWhitelist.Export(
+                        UsbMonitor.GetWhitelist(), dlg.FileName);
+                    MessageBox.Show(
+                        "Whitelist экспортирован:\n" + dlg.FileName +
+                        "\n\nПеренесите .wlb на другой компьютер и выберите «Импортировать whitelist».",
+                        Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Ошибка экспорта:\n" + ex.Message,
+                        Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
         }
@@ -3499,20 +3377,10 @@ namespace UsbBlockTray
                 dlg.Filter = "UsbBlock whitelist (*.wlb)|*.wlb|Все файлы (*.*)|*.*";
                 if (dlg.ShowDialog() != DialogResult.OK) return;
 
-                string password = string.Empty;
-                string prompt = "Файл с паролем? Введите пароль\n" +
-                                "(для файла без пароля просто нажмите OK):";
-                using (PasswordPromptForm pf = new PasswordPromptForm(
-                    "Пароль файла", prompt, true))
-                {
-                    if (pf.ShowDialog() != DialogResult.OK) return;
-                    password = pf.Password;
-                }
-
                 List<DeviceEntry> imported;
                 try
                 {
-                    imported = PortableWhitelist.Import(dlg.FileName, password);
+                    imported = PortableWhitelist.Import(dlg.FileName);
                 }
                 catch (Exception ex)
                 {
@@ -4804,7 +4672,7 @@ namespace UsbBlockTray
     }
 
     // =====================================================================
-    // Самопроверка: криптография, перенос, сериализация
+    // Самопроверка: перенос, сериализация
     // =====================================================================
     internal static class Selftest
     {
@@ -4824,30 +4692,11 @@ namespace UsbBlockTray
 
             string dir = Path.GetTempPath();
             string plainFile = Path.Combine(dir, "usb_selftest_plain.wlb");
-            string encFile = Path.Combine(dir, "usb_selftest_enc.wlb");
             try
             {
-                // без пароля
-                PortableWhitelist.Export(list, plainFile, string.Empty);
-                List<DeviceEntry> r1 = PortableWhitelist.Import(plainFile, "irrelevant");
-                sb.AppendLine("Plain export/import: " + (r1.Count == 1 && r1[0].Serial == "081NS9HV47JMZLUQ" ? "OK" : "FAIL"));
-
-                // с паролем
-                PortableWhitelist.Export(list, encFile, "secret123");
-                List<DeviceEntry> r2 = PortableWhitelist.Import(encFile, "secret123");
-                sb.AppendLine("Encrypted export/import: " + (r2.Count == 1 && r2[0].UsbId == "USB\\VID_8564&PID_1000" ? "OK" : "FAIL"));
-
-                // неверный пароль должен упасть
-                bool badOk = false;
-                try { PortableWhitelist.Import(encFile, "wrong"); }
-                catch (UnauthorizedAccessException) { badOk = true; }
-                catch { }
-                sb.AppendLine("Wrong password rejected: " + (badOk ? "OK" : "FAIL"));
-
-                // файл зашифрованного должен быть НЕ текстом (garbage)
-                byte[] encBytes = File.ReadAllBytes(encFile);
-                bool looksBinary = ContainsNonText(encBytes);
-                sb.AppendLine("Encrypted file is binary (no text): " + (looksBinary ? "OK" : "FAIL"));
+                PortableWhitelist.Export(list, plainFile);
+                List<DeviceEntry> r1 = PortableWhitelist.Import(plainFile);
+                sb.AppendLine("Export/import: " + (r1.Count == 1 && r1[0].Serial == "081NS9HV47JMZLUQ" ? "OK" : "FAIL"));
             }
             catch (Exception ex)
             {
@@ -4856,7 +4705,6 @@ namespace UsbBlockTray
             finally
             {
                 try { if (File.Exists(plainFile)) File.Delete(plainFile); } catch { }
-                try { if (File.Exists(encFile)) File.Delete(encFile); } catch { }
             }
 
             // сериализация dat-payload
@@ -4923,26 +4771,6 @@ namespace UsbBlockTray
             }
 
             return sb.ToString().Replace(Environment.NewLine, " | ");
-        }
-
-        private static bool ContainsNonText(byte[] data)
-        {
-            // Эвристика: у AES-шифротекста (равномерный шум) лишь ~37% читаемых
-            // байт. У текстового файла читаемых байт - большинство.
-            int total = 0;
-            int readable = 0;
-            foreach (byte b in data)
-            {
-                total++;
-                if (b == '\n' || b == '\r' || b == '\t')
-                {
-                    readable++;
-                    continue;
-                }
-                if (b >= 0x20 && b <= 0x7E)
-                    readable++;
-            }
-            return readable * 10 < total * 6;
         }
     }
 }
