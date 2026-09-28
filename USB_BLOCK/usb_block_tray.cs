@@ -302,6 +302,138 @@ namespace UsbBlockTray
         public DateTime AddedAt;
     }
 
+    // =====================================================================
+    // Правила whitelist: один накопитель - одна запись.
+    // Записи об ОДНОМ И ТОМ ЖЕ накопителе считаются дубликатами и
+    // удаляются при добавлении, импорте и сохранении.
+    // Признаки устройства проверяются по очереди:
+    //   1) серийный номер (главный признак; сравнение без учёта регистра,
+    //      хвост "&0"/"&1f" от USBSTOR отбрасывается);
+    //   2) если серийник у одной из записей неизвестен - HardwareID диска;
+    //   3) если нет ни серийника, ни HardwareID - модель USB (VID&PID).
+    // Запись БЕЗ серийника разрешает всю модель USB (так работает проверка
+    // IsVolumeAllowed/IsDiskAllowed), поэтому вторая флешка той же модели
+    // с неизвестным серийником - дубликат: добавлять её незачем.
+    // =====================================================================
+    public static class WhitelistRules
+    {
+        public static string Norm(string value)
+        {
+            return string.IsNullOrEmpty(value) ? string.Empty : value.Trim().ToUpperInvariant();
+        }
+
+        // Серийный номер в сравнимом виде: без хвоста "&<hex>" от USBSTOR,
+        // без пробелов, в верхнем регистре (081ns9hv47jmlzuq&0 = 081NS9HV47JMZLUQ).
+        public static string NormSerial(string serial)
+        {
+            if (string.IsNullOrEmpty(serial)) return string.Empty;
+            string s = serial.Trim();
+            int amp = s.LastIndexOf('&');
+            int tailLen = s.Length - amp - 1;
+            if (amp > 0 && tailLen >= 1 && tailLen <= 2)
+            {
+                bool hex = true;
+                for (int i = amp + 1; i < s.Length; i++)
+                {
+                    if (!Uri.IsHexDigit(s[i])) { hex = false; break; }
+                }
+                if (hex) s = s.Substring(0, amp);
+            }
+            return Norm(s);
+        }
+
+        // Ключ записи: первый непустой признак (серийник -> диск -> модель -> имя)
+        public static string EntryKey(DeviceEntry e)
+        {
+            if (e == null) return string.Empty;
+            string s = NormSerial(e.Serial);
+            if (s.Length > 0) return "S:" + s;
+            string d = Norm(e.DiskId);
+            if (d.Length > 0) return "D:" + d;
+            string u = Norm(e.UsbId);
+            if (u.Length > 0) return "U:" + u;
+            return "N:" + Norm(e.Name);
+        }
+
+        // Один и тот же накопитель?
+        public static bool SameDevice(DeviceEntry a, DeviceEntry b)
+        {
+            if (a == null || b == null) return false;
+
+            string sa = NormSerial(a.Serial);
+            string sb = NormSerial(b.Serial);
+            if (sa.Length > 0 && sb.Length > 0) return sa == sb;
+
+            string da = Norm(a.DiskId);
+            string db = Norm(b.DiskId);
+            if (da.Length > 0 && db.Length > 0) return da == db;
+
+            string ua = Norm(a.UsbId);
+            string ub = Norm(b.UsbId);
+            if (ua.Length > 0 && ub.Length > 0) return ua == ub;
+
+            return false;
+        }
+
+        // Индекс первой записи о том же накопителе, иначе -1
+        public static int Find(List<DeviceEntry> list, DeviceEntry e)
+        {
+            if (list == null || e == null) return -1;
+            for (int i = 0; i < list.Count; i++)
+                if (SameDevice(list[i], e)) return i;
+            return -1;
+        }
+
+        // Чистка списка от дубликатов: остаётся ПЕРВАЯ запись о накопителе,
+        // ей дописывается имя, если своё пустое. USB ID/серийник/HardwareID
+        // не меняются - иначе изменилось бы то, чем устройство опознаётся.
+        // removed - сколько записей-дубликатов отброшено.
+        public static List<DeviceEntry> Dedupe(List<DeviceEntry> list, out int removed)
+        {
+            removed = 0;
+            List<DeviceEntry> result = new List<DeviceEntry>();
+            if (list == null) return result;
+
+            foreach (DeviceEntry e in list)
+            {
+                if (e == null) { removed++; continue; }
+                int idx = Find(result, e);
+                if (idx >= 0)
+                {
+                    removed++;
+                    if (string.IsNullOrEmpty(result[idx].Name) && !string.IsNullOrEmpty(e.Name))
+                        result[idx].Name = e.Name;
+                    continue;
+                }
+                result.Add(e);
+            }
+            return result;
+        }
+
+        // Объединение двух списков без дубликатов (в т.ч. внутри каждого
+        // списка). Записи existing имеют приоритет: incoming с тем же
+        // накопителем отбрасывается, порядок записей сохраняется.
+        public static List<DeviceEntry> Merge(List<DeviceEntry> existing, List<DeviceEntry> incoming)
+        {
+            List<DeviceEntry> result = new List<DeviceEntry>();
+            int removed;
+
+            if (existing != null)
+            {
+                List<DeviceEntry> keep = Dedupe(existing, out removed);
+                foreach (DeviceEntry e in keep) result.Add(e);
+            }
+            if (incoming != null)
+            {
+                List<DeviceEntry> add = Dedupe(incoming, out removed);
+                foreach (DeviceEntry e in add)
+                    if (Find(result, e) < 0)
+                        result.Add(e);
+            }
+            return result;
+        }
+    }
+
     public static class StorePaths
     {
         public static string Directory
@@ -534,7 +666,12 @@ namespace UsbBlockTray
 
         public static void Save(List<DeviceEntry> list)
         {
-            byte[] payload = SerializePayload(list);
+            // Дубликаты в файл не попадают ни при каком сценарии: даже
+            // если список содержал их до очистки (старая версия, импорт
+            // без дедупликации) - они отбрасываются при записи.
+            int removed;
+            List<DeviceEntry> clean = WhitelistRules.Dedupe(list, out removed);
+            byte[] payload = SerializePayload(clean);
 
             using (MemoryStream ms = new MemoryStream())
             {
@@ -599,7 +736,11 @@ namespace UsbBlockTray
 
         public static void Export(List<DeviceEntry> list, string path)
         {
-            byte[] payload = WhitelistStore.SerializePayload(list);
+            // В переносимый файл дубликаты не попадают (в т.ч. если
+            // текущий whitelist содержал их до очистки).
+            int removed;
+            List<DeviceEntry> clean = WhitelistRules.Dedupe(list, out removed);
+            byte[] payload = WhitelistStore.SerializePayload(clean);
             using (FileStream fs = new FileStream(path, FileMode.Create))
             using (BinaryWriter bw = new BinaryWriter(fs))
             {
@@ -3090,19 +3231,12 @@ namespace UsbBlockTray
                 e.Serial = sd.Serial;
                 e.AddedAt = DateTime.Now;
 
-                bool dup = false;
-                foreach (DeviceEntry x in current)
+                // Проверка дубликата: тот же накопитель уже разрешён -
+                // вторая запись не добавляется (одна запись = одно устройство).
+                int dupIndex = WhitelistRules.Find(current, e);
+                if (dupIndex >= 0)
                 {
-                    if (string.Equals(x.UsbId, e.UsbId, StringComparison.OrdinalIgnoreCase) &&
-                        string.Equals(x.Serial ?? "", e.Serial ?? "", StringComparison.OrdinalIgnoreCase))
-                    {
-                        dup = true;
-                        break;
-                    }
-                }
-                if (dup)
-                {
-                    MessageBox.Show("Этот накопитель уже есть в whitelist.",
+                    MessageBox.Show(DuplicateMessage(e, current[dupIndex]),
                         Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
@@ -3149,6 +3283,50 @@ namespace UsbBlockTray
                                 "Накопитель разрешён и получит букву диска автоматически.",
                     Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
+        }
+
+        // Сообщение о дубликате при добавлении: что уже есть в whitelist
+        // (имя, USB ID, HardwareID диска, серийник, дата) и что делать.
+        private static string DuplicateMessage(DeviceEntry added, DeviceEntry exists)
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine("Этот накопитель уже есть в whitelist - повторно добавлять не нужно.");
+            sb.AppendLine();
+            sb.AppendLine("В whitelist уже записано:");
+
+            string name = string.IsNullOrEmpty(exists.Name) ? "(без имени)" : exists.Name;
+            sb.AppendLine("  Ім'я пристрою: " + name);
+            if (!string.IsNullOrEmpty(exists.UsbId))
+                sb.AppendLine("  Тип пристрою (ID): " + exists.UsbId);
+            if (!string.IsNullOrEmpty(exists.DiskId))
+                sb.AppendLine("  Модель пристрою: " + exists.DiskId);
+            if (!string.IsNullOrEmpty(exists.Serial))
+                sb.AppendLine("  Серийный номер: " + exists.Serial);
+            else
+                sb.AppendLine("  Серийный номер: не определён (запись разрешает всю модель " +
+                              (string.IsNullOrEmpty(exists.UsbId) ? "" : exists.UsbId) + ")");
+            if (exists.AddedAt != default(DateTime))
+                sb.AppendLine("  Добавлен: " + exists.AddedAt.ToString("yyyy-MM-dd HH:mm"));
+
+            if (added != null && !string.IsNullOrEmpty(added.Serial) &&
+                !string.Equals(WhitelistRules.NormSerial(added.Serial),
+                               WhitelistRules.NormSerial(exists.Serial), StringComparison.OrdinalIgnoreCase))
+            {
+                sb.AppendLine();
+                sb.AppendLine("Внимание: серийные номера различаются (" +
+                              (string.IsNullOrEmpty(added.Serial) ? "не определён" : added.Serial) +
+                              " и " + (string.IsNullOrEmpty(exists.Serial) ? "не определён" : exists.Serial) +
+                              "), а совпал HardwareID диска или модель USB. Если это ДРУГОЙ накопитель - " +
+                              "сначала удалите старую запись (пункт «4 Удалить устройство из whitelist»), " +
+                              "после чего добавьте этот заново.");
+            }
+            else
+            {
+                sb.AppendLine();
+                sb.AppendLine("Накопитель уже разрешён. Чтобы внести изменения, сначала удалите " +
+                              "старую запись (пункт «4 Удалить устройство из whitelist»).");
+            }
+            return sb.ToString();
         }
 
         // Список накопителей для диалога добавления: подключённые сейчас
@@ -3249,12 +3427,13 @@ namespace UsbBlockTray
                     != DialogResult.Yes)
                     return;
 
+                // Удаляются выбранные записи и их дубликаты (тот же накопитель)
                 HashSet<string> keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (DeviceEntry e in selected) keys.Add(EntryKey(e));
+                foreach (DeviceEntry e in selected) keys.Add(WhitelistRules.EntryKey(e));
                 List<DeviceEntry> result = new List<DeviceEntry>();
                 foreach (DeviceEntry e in wl)
                 {
-                    if (!keys.Contains(EntryKey(e)))
+                    if (!keys.Contains(WhitelistRules.EntryKey(e)))
                         result.Add(e);
                 }
 
@@ -3377,10 +3556,10 @@ namespace UsbBlockTray
                 dlg.Filter = "UsbBlock whitelist (*.wlb)|*.wlb|Все файлы (*.*)|*.*";
                 if (dlg.ShowDialog() != DialogResult.OK) return;
 
-                List<DeviceEntry> imported;
+                List<DeviceEntry> raw;
                 try
                 {
-                    imported = PortableWhitelist.Import(dlg.FileName);
+                    raw = PortableWhitelist.Import(dlg.FileName);
                 }
                 catch (Exception ex)
                 {
@@ -3389,22 +3568,62 @@ namespace UsbBlockTray
                     return;
                 }
 
-                List<DeviceEntry> current = UsbMonitor.GetWhitelist();
-                string msg = "Импортировано записей (устройств): " +
-                             imported.Count.ToString(CultureInfo.InvariantCulture) + "\n\n" +
-                             "Текущий whitelist: " + current.Count.ToString(CultureInfo.InvariantCulture) +
-                             " записей.\n\n" +
-                             "Как применить импортированные данные?\n\n" +
-                             "  «Да»     - перезаписать (заменить) текущий whitelist\n" +
-                             "  «Нет»    - добавить к текущему whitelist (объединить)\n" +
-                             "  «Отмена» - отменить";
-                DialogResult action = MessageBox.Show(msg, Program.Title,
+                // Дедупликация файла импорта: одинаковые накопители внутри
+                // одного .wlb не добавляются (файл мог быть собран вручную
+                // или старой версией без проверки).
+                int dupInFile;
+                List<DeviceEntry> imported = WhitelistRules.Dedupe(raw, out dupInFile);
+                if (imported.Count == 0)
+                {
+                    MessageBox.Show("Файл не содержит ни одного устройства - импорт отменён.",
+                        Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                // Текущий whitelist тоже чистим: в нём могли остаться
+                // дубликаты от старой версии (или ручной правки файла).
+                int dupCurrent;
+                List<DeviceEntry> current = WhitelistRules.Dedupe(
+                    UsbMonitor.GetWhitelist(), out dupCurrent);
+
+                StringBuilder msg = new StringBuilder();
+                msg.AppendLine("Импортировано записей (устройств): " +
+                    imported.Count.ToString(CultureInfo.InvariantCulture) + ".");
+                if (dupInFile > 0)
+                    msg.AppendLine("Дубликатов в файле отброшено: " +
+                        dupInFile.ToString(CultureInfo.InvariantCulture) + ".");
+                msg.AppendLine();
+                msg.AppendLine("Текущий whitelist: " +
+                    current.Count.ToString(CultureInfo.InvariantCulture) + " записей.");
+                if (dupCurrent > 0)
+                    msg.AppendLine("Дубликатов в текущем whitelist будет убрано: " +
+                        dupCurrent.ToString(CultureInfo.InvariantCulture) + ".");
+                msg.AppendLine();
+                msg.AppendLine("Как применить импортированные данные?");
+                msg.AppendLine();
+                msg.AppendLine("  «Да»     - перезаписать (заменить) текущий whitelist");
+                msg.AppendLine("  «Нет»    - добавить к текущему whitelist (объединить)");
+                msg.AppendLine("  «Отмена» - отменить");
+                DialogResult action = MessageBox.Show(msg.ToString(), Program.Title,
                     MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
                 if (action == DialogResult.Cancel) return;
 
-                List<DeviceEntry> result = (action == DialogResult.Yes)
-                    ? imported
-                    : MergeWhitelists(current, imported);
+                // Дубликаты не попадают в результат ни при замене, ни при
+                // объединении; при объединении считаем, сколько записей
+                // импорта реально добавилось, а сколько уже было.
+                int addedCount = 0;
+                List<DeviceEntry> result;
+                if (action == DialogResult.Yes)
+                {
+                    result = imported;
+                    addedCount = imported.Count;
+                }
+                else
+                {
+                    result = MergeWhitelists(current, imported);
+                    addedCount = result.Count - current.Count;
+                }
+                int skipped = imported.Count - addedCount;
 
                 try
                 {
@@ -3421,7 +3640,8 @@ namespace UsbBlockTray
                     if (action == DialogResult.Yes)
                     {
                         MessageBox.Show("Whitelist заменён: " +
-                            result.Count.ToString(CultureInfo.InvariantCulture) + " устройств.",
+                            result.Count.ToString(CultureInfo.InvariantCulture) + " устройств." +
+                            DupReport(dupInFile, 0, 0),
                             Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     }
                     else
@@ -3429,8 +3649,9 @@ namespace UsbBlockTray
                         MessageBox.Show("Whitelist объединён:\n" +
                             "было " + current.Count.ToString(CultureInfo.InvariantCulture) +
                             ", добавлено " +
-                            (result.Count - current.Count).ToString(CultureInfo.InvariantCulture) +
-                            ", стало " + result.Count.ToString(CultureInfo.InvariantCulture) + " устройств.",
+                            addedCount.ToString(CultureInfo.InvariantCulture) +
+                            ", стало " + result.Count.ToString(CultureInfo.InvariantCulture) +
+                            " устройств." + DupReport(dupInFile, skipped, dupCurrent),
                             Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     }
                 }
@@ -3442,26 +3663,33 @@ namespace UsbBlockTray
             }
         }
 
-        // Объединение двух whitelist: сохраняет существующие записи
-        // и добавляет запрошенные (без дубликатов по USB ID + серийному номеру)
+        // Отчёт о дедупликации после импорта (пустая строка, если дублей нет):
+        // inFile - дубликаты внутри файла, already - записи импорта, которые
+        // уже были в whitelist, inCurrent - дубликаты в прежнем списке.
+        private static string DupReport(int inFile, int already, int inCurrent)
+        {
+            if (inFile <= 0 && already <= 0 && inCurrent <= 0) return string.Empty;
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine();
+            if (inFile > 0)
+                sb.AppendLine("Дубликатов в файле отброшено: " +
+                    inFile.ToString(CultureInfo.InvariantCulture) + ".");
+            if (already > 0)
+                sb.AppendLine("Пропущено (накопитель уже был в whitelist): " +
+                    already.ToString(CultureInfo.InvariantCulture) + ".");
+            if (inCurrent > 0)
+                sb.AppendLine("Дубликатов в прежнем whitelist убрано: " +
+                    inCurrent.ToString(CultureInfo.InvariantCulture) + ".");
+            return sb.ToString();
+        }
+
+        // Объединение двух whitelist без дубликатов (WhitelistRules.Merge):
+        // сохраняет существующие записи, добавляет только те, которых
+        // ещё нет; дубликаты внутри обоих списков также отбрасываются.
         internal static List<DeviceEntry> MergeWhitelists(
             List<DeviceEntry> existing, List<DeviceEntry> incoming)
         {
-            List<DeviceEntry> result = new List<DeviceEntry>(existing);
-            HashSet<string> keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (DeviceEntry e in existing)
-                keys.Add(EntryKey(e));
-            foreach (DeviceEntry e in incoming)
-            {
-                if (keys.Add(EntryKey(e)))
-                    result.Add(e);
-            }
-            return result;
-        }
-
-        private static string EntryKey(DeviceEntry e)
-        {
-            return (e.UsbId ?? string.Empty) + "|" + (e.Serial ?? string.Empty);
+            return WhitelistRules.Merge(existing, incoming);
         }
 
         // =============================================================
@@ -4768,6 +4996,84 @@ namespace UsbBlockTray
             catch (Exception ex)
             {
                 sb.AppendLine("Merge ERROR: " + ex.Message);
+            }
+
+            // проверка дубликатов при ДОБАВЛЕНИИ устройства
+            try
+            {
+                List<DeviceEntry> wl = new List<DeviceEntry>
+                {
+                    new DeviceEntry
+                    {
+                        Name = "Флешка 1",
+                        UsbId = "USB\\VID_8564&PID_1000",
+                        DiskId = "USBSTOR\\Disk&Ven_8564&Prod_X&Rev_1100\\S1&0",
+                        Serial = "S1",
+                        AddedAt = DateTime.Now
+                    }
+                };
+                // тот же накопитель: серийник в другом регистре и с хвостом "&0"
+                DeviceEntry sameSn = new DeviceEntry
+                {
+                    Name = "Флешка 1 (повтор)",
+                    UsbId = "usb\\vid_8564&pid_1000",
+                    Serial = "s1&0"
+                };
+                // тот же накопитель: серийник неизвестен, совпал HardwareID диска
+                DeviceEntry sameDisk = new DeviceEntry
+                {
+                    UsbId = "USB\\VID_8564&PID_1000",
+                    DiskId = "USBSTOR\\Disk&Ven_8564&Prod_X&Rev_1100\\S1&0"
+                };
+                // ДРУГАЯ флешка той же модели - дубликатом не считается
+                DeviceEntry other = new DeviceEntry
+                {
+                    UsbId = "USB\\VID_8564&PID_1000",
+                    DiskId = "USBSTOR\\Disk&Ven_8564&Prod_X&Rev_1100\\S2&0",
+                    Serial = "S2"
+                };
+                bool ok = WhitelistRules.Find(wl, sameSn) == 0 &&
+                          WhitelistRules.Find(wl, sameDisk) == 0 &&
+                          WhitelistRules.Find(wl, other) < 0;
+                sb.AppendLine("Dedup add: " + (ok ? "OK" : "FAIL"));
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine("Dedup add ERROR: " + ex.Message);
+            }
+
+            // проверка дубликатов при ИМПОРТЕ (внутри файла и против текущего)
+            try
+            {
+                List<DeviceEntry> file = new List<DeviceEntry>
+                {
+                    new DeviceEntry { Name = "A", UsbId = "USB\\VID_8564&PID_1000", Serial = "S1" },
+                    new DeviceEntry { Name = "A (копия)", UsbId = "USB\\VID_8564&PID_1000", Serial = "S1" },
+                    new DeviceEntry { Name = "B", UsbId = "USB\\VID_1234&PID_5678", Serial = "S3" }
+                };
+                int dupInFile;
+                List<DeviceEntry> clean = WhitelistRules.Dedupe(file, out dupInFile);
+
+                List<DeviceEntry> baseWl = new List<DeviceEntry>
+                {
+                    new DeviceEntry { Name = "A", UsbId = "USB\\VID_8564&PID_1000", Serial = "S1" },
+                    new DeviceEntry { Name = "A (ещё раз)", UsbId = "USB\\VID_8564&PID_1000", Serial = "s1&0" }
+                };
+                int dupBase;
+                List<DeviceEntry> baseClean = WhitelistRules.Dedupe(baseWl, out dupBase);
+                List<DeviceEntry> merged = TrayContext.MergeWhitelists(baseClean, clean);
+
+                bool ok = clean.Count == 2 && dupInFile == 1 &&
+                          baseClean.Count == 1 && dupBase == 1 &&
+                          merged.Count == 2;
+                sb.AppendLine("Dedup import: " + (ok ? "OK" : "FAIL") +
+                    " (файл: " + clean.Count.ToString(CultureInfo.InvariantCulture) +
+                    " из " + file.Count.ToString(CultureInfo.InvariantCulture) +
+                    ", после слияния: " + merged.Count.ToString(CultureInfo.InvariantCulture) + ")");
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine("Dedup import ERROR: " + ex.Message);
             }
 
             return sb.ToString().Replace(Environment.NewLine, " | ");
