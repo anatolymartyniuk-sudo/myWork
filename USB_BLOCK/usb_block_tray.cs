@@ -728,18 +728,25 @@ namespace UsbBlockTray
     // Устанавливается при пункте 7 «Установить службу мониторинга»: сначала
     // вопрос «установить пароль?», при «Да» - ввод пароля с подтверждением.
     // После этого пароль запрашивается перед пунктами 2, 3, 4, 6, 8, 9.
+    // Требования к паролю: не короче MinLength символов, обязательно есть
+    // строчная и ПРОПИСНАЯ латинская буква и цифра (MatchesPolicy).
     // Сам пароль НЕ хранится: в файле только PBKDF2-хэш (HMAC-SHA256,
     // 20000 итераций, случайная соль 16 байт). Файл закрыт DPAPI
     // LocalMachine и ACL - читается только администратором/SYSTEM, как
-    // whitelist.dat. Забытый пароль восстановить нельзя (и нельзя сбросить):
-    // при его установке выводится предупреждение.
+    // whitelist.dat. Забытый пароль восстановить нельзя - его можно только
+    // УДАЛИТЬ (пункт меню «Удалить пароль»): либо введя текущий пароль,
+    // либо кодовое слово RecoveryCode.
     // =====================================================================
     public static class AdminPassword
     {
         private const int Iterations = 20000;
         private const int SaltLen = 16;
         private const int HashLen = 32;
-        public const int MinLength = 4;
+        public const int MinLength = 6;
+
+        // Кодовое слово для удаления пароля, если текущий пароль неизвестен
+        // или забыт. Сравнение - за постоянное время, регистр не важен.
+        private const string RecoveryCode = "odmin";
 
         private static readonly byte[] Magic =
             { (byte)'U', (byte)'S', (byte)'B', (byte)'W', (byte)'P', 1 };
@@ -759,6 +766,41 @@ namespace UsbBlockTray
         {
             try { return File.Exists(FilePath); }
             catch { return false; }
+        }
+
+        // Требования к паролю: длина, строчная + ПРОПИСНАЯ латинские буквы
+        // и цифра. Всё, что сверх этого (пробелы, знаки, кириллица),
+        // допускается, но не засчитывается как выполнение требований.
+        public static bool MatchesPolicy(string password)
+        {
+            if (string.IsNullOrEmpty(password) || password.Length < MinLength)
+                return false;
+            bool lower = false, upper = false, digit = false;
+            for (int i = 0; i < password.Length; i++)
+            {
+                char c = password[i];
+                if (c >= 'a' && c <= 'z') lower = true;
+                else if (c >= 'A' && c <= 'Z') upper = true;
+                else if (c >= '0' && c <= '9') digit = true;
+            }
+            return lower && upper && digit;
+        }
+
+        public static string PolicyHint()
+        {
+            return "Пароль должен быть не короче " +
+                MinLength.ToString(CultureInfo.InvariantCulture) +
+                " символов и содержать строчные и ПРОПИСНЫЕ латинские буквы и цифры.";
+        }
+
+        // Кодовое слово - второй способ удалить пароль (в --selftest и при
+        // удалении пароля из меню). Регистр и края пробелов не важны:
+        // забытый пароль нельзя восстановить из-за случайно нажатого Caps Lock.
+        public static bool CheckCode(string code)
+        {
+            string a = (code ?? string.Empty).Trim().ToUpperInvariant();
+            string b = RecoveryCode.ToUpperInvariant();
+            return FixedTimeEquals(Encoding.UTF8.GetBytes(a), Encoding.UTF8.GetBytes(b));
         }
 
         // Запись пароля в виде байтов: сигнатура + число итераций + соль +
@@ -828,9 +870,8 @@ namespace UsbBlockTray
 
         public static void Set(string password)
         {
-            if (string.IsNullOrEmpty(password) || password.Length < MinLength)
-                throw new ArgumentException(
-                    "Пароль должен быть не короче " + MinLength + " символов.");
+            if (!MatchesPolicy(password))
+                throw new ArgumentException(PolicyHint());
 
             byte[] salt;
             byte[] plain = PackRecord(password, out salt);
@@ -853,6 +894,22 @@ namespace UsbBlockTray
                 byte[] plain = ProtectedData.Unprotect(raw, Entropy,
                     DataProtectionScope.LocalMachine);
                 return CheckPacked(password, plain);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // Удаление пароля (пункт меню «Удалить пароль»): файл стирается,
+        // после чего пункты 2, 3, 4, 6, 8, 9 снова доступны без пароля.
+        public static bool Clear()
+        {
+            try
+            {
+                if (!File.Exists(FilePath)) return true;
+                File.Delete(FilePath);
+                return !File.Exists(FilePath);
             }
             catch
             {
@@ -2760,13 +2817,20 @@ namespace UsbBlockTray
         public string Password { get; private set; }
 
         public PasswordForm(string caption, string prompt, bool confirm)
+            : this(caption, prompt, confirm, null)
+        {
+        }
+
+        // fieldLabel - подпись первого поля («Пароль:», «Кодовое слово:» и т.п.);
+        // при confirm=true используется как подпись «Новый пароль».
+        public PasswordForm(string caption, string prompt, bool confirm,
+            string fieldLabel)
         {
             _confirm = confirm;
 
             int topPass = confirm ? 78 : 70;
             int topRepeat = topPass + 50;
             int topButtons = (confirm ? topRepeat : topPass) + 36;
-            string minLen = AdminPassword.MinLength.ToString(CultureInfo.InvariantCulture);
 
             this.Text = caption;
             this.StartPosition = FormStartPosition.CenterScreen;
@@ -2774,19 +2838,19 @@ namespace UsbBlockTray
             this.MaximizeBox = false;
             this.MinimizeBox = false;
             this.ShowInTaskbar = false;
-            this.ClientSize = new Size(470, topButtons + 44);
+            this.ClientSize = new Size(470, topButtons + 60);
             this.Font = new Font("Segoe UI", 9f);
 
             Label lbl = new Label();
             lbl.Text = prompt;
             lbl.AutoSize = false;
-            lbl.Size = new Size(446, 40);
+            lbl.Size = new Size(446, 56);
             lbl.Location = new Point(12, 10);
 
             Label lblPass = new Label();
-            lblPass.Text = confirm
-                ? "Новый пароль (не короче " + minLen + " символов):"
-                : "Пароль:";
+            lblPass.Text = string.IsNullOrEmpty(fieldLabel)
+                ? (confirm ? "Новый пароль:" : "Пароль:")
+                : fieldLabel;
             lblPass.AutoSize = true;
             lblPass.Location = new Point(12, topPass - 20);
 
@@ -2843,11 +2907,9 @@ namespace UsbBlockTray
 
             if (_confirm)
             {
-                if (pass.Length < AdminPassword.MinLength)
+                if (!AdminPassword.MatchesPolicy(pass))
                 {
-                    MessageBox.Show("Пароль должен быть не короче " +
-                        AdminPassword.MinLength.ToString(CultureInfo.InvariantCulture) +
-                        " символов.", Program.Title,
+                    MessageBox.Show(AdminPassword.PolicyHint(), Program.Title,
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
                     _tbPass.Focus();
                     return;
@@ -3352,6 +3414,12 @@ namespace UsbBlockTray
             ToolStripMenuItem mUninstall = new ToolStripMenuItem("9 Удалить программу...");
             mUninstall.Click += delegate { DoUninstall(); };
             _menu.Items.Add(mUninstall);
+
+            _menu.Items.Add(new ToolStripSeparator());
+
+            ToolStripMenuItem mDelPass = new ToolStripMenuItem("Удалить пароль");
+            mDelPass.Click += delegate { DoRemovePassword(); };
+            _menu.Items.Add(mDelPass);
 
             _menu.Items.Add(new ToolStripSeparator());
 
@@ -4292,8 +4360,9 @@ namespace UsbBlockTray
                 sb.AppendLine("  8 Удалить службу мониторинга");
                 sb.AppendLine("  9 Удалить программу");
                 sb.AppendLine();
-                sb.AppendLine("Внимание: пароль нигде не сохраняется - хранится только");
-                sb.AppendLine("его хэш, и сбросить его нечем. Запомните пароль.");
+                sb.AppendLine(AdminPassword.PolicyHint());
+                sb.AppendLine("Запомните пароль: он хранится только в виде хэша.");
+                sb.AppendLine("Забытый пароль удаляется пунктом «Удалить пароль».");
             }
 
             if (MessageBox.Show(sb.ToString(), Program.Title,
@@ -4301,7 +4370,9 @@ namespace UsbBlockTray
                 return true;
 
             using (PasswordForm f = new PasswordForm("Установка пароля",
-                "Задайте пароль для пунктов 2, 3, 4, 6, 8, 9:", true))
+                "Задайте пароль для пунктов 2, 3, 4, 6, 8, 9.\n" +
+                    AdminPassword.PolicyHint(), true,
+                "Новый пароль:"))
             {
                 if (f.ShowDialog() != DialogResult.OK) return false;
                 try
@@ -4326,6 +4397,104 @@ namespace UsbBlockTray
                 "  9 Удалить программу",
                 Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return true;
+        }
+
+        // =============================================================
+        // Пункт меню «Удалить пароль»
+        // Пароль удаляется либо вводом текущего пароля, либо кодовым словом
+        // (если пароль забыт). Защиты с паролём после этого не остаётся.
+        // =============================================================
+        private void DoRemovePassword()
+        {
+            if (!EnsureAdmin()) return;
+
+            if (!AdminPassword.IsSet())
+            {
+                MessageBox.Show("Пароль не установлен - удалять нечего.",
+                    Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine("Удалить пароль защиты?");
+            sb.AppendLine();
+            sb.AppendLine("  «Да»     - подтвердить текущим паролем");
+            sb.AppendLine("  «Нет»    - подтвердить кодовым словом (если пароль забыт)");
+            sb.AppendLine("  «Отмена» - ничего не делать");
+            sb.AppendLine();
+            sb.AppendLine("После удаления пункты 2, 3, 4, 6, 8, 9 будут");
+            sb.AppendLine("доступны без пароля.");
+            DialogResult how = MessageBox.Show(sb.ToString(), Program.Title,
+                MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
+            if (how == DialogResult.Cancel) return;
+
+            bool confirmed = how == DialogResult.Yes
+                ? AskCurrentPassword()
+                : AskRecoveryCode();
+            if (!confirmed) return;
+
+            if (!AdminPassword.Clear())
+            {
+                MessageBox.Show("Не удалось удалить файл пароля:\n" +
+                        AdminPassword.FilePath,
+                    Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            MessageBox.Show("Пароль удалён.\n\n" +
+                "Пункты 2, 3, 4, 6, 8, 9 теперь доступны без пароля.",
+                Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        // Текущий пароль (как в EnsurePassword, но без требования, чтобы он
+        // был установлен).
+        private bool AskCurrentPassword()
+        {
+            for (int attempt = 1; attempt <= PasswordAttempts; attempt++)
+            {
+                using (PasswordForm f = new PasswordForm("Удаление пароля",
+                    "Введите текущий пароль:", false, "Пароль:"))
+                {
+                    if (f.ShowDialog() != DialogResult.OK) return false;
+                    if (AdminPassword.Verify(f.Password)) return true;
+                }
+
+                if (attempt < PasswordAttempts)
+                {
+                    MessageBox.Show("Неверный пароль.\nОсталось попыток: " +
+                        (PasswordAttempts - attempt).ToString(CultureInfo.InvariantCulture) + ".",
+                        Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+
+            MessageBox.Show("Превышено число попыток ввода пароля.\nПароль не удалён.",
+                Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
+
+        // Кодовое слово - для случая, когда текущий пароль забыт.
+        private bool AskRecoveryCode()
+        {
+            for (int attempt = 1; attempt <= PasswordAttempts; attempt++)
+            {
+                using (PasswordForm f = new PasswordForm("Удаление пароля",
+                    "Введите кодовое слово:", false, "Кодовое слово:"))
+                {
+                    if (f.ShowDialog() != DialogResult.OK) return false;
+                    if (AdminPassword.CheckCode(f.Password)) return true;
+                }
+
+                if (attempt < PasswordAttempts)
+                {
+                    MessageBox.Show("Неверное кодовое слово.\nОсталось попыток: " +
+                        (PasswordAttempts - attempt).ToString(CultureInfo.InvariantCulture) + ".",
+                        Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+
+            MessageBox.Show("Превышено число попыток ввода кодового слова.\nПароль не удалён.",
+                Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
         }
 
         private void HandleDeviceChange()
@@ -5440,21 +5609,35 @@ namespace UsbBlockTray
                 sb.AppendLine("Dedup import ERROR: " + ex.Message);
             }
 
-            // пароль защиты: верный пароль проходит проверку, неверный,
-            // другая соль и испорченная запись - нет (файл при этом не трогается)
+            // пароль защиты: требования к паролю, кодовое слово и проверка
+            // хэша (файл пароля при этом не создаётся и не меняется)
             try
             {
                 byte[] salt;
                 byte[] packed = AdminPassword.PackRecord("Passw0rd", out salt);
                 byte[] salt2;
                 byte[] packed2 = AdminPassword.PackRecord("Passw0rd", out salt2);
-                bool ok = AdminPassword.CheckPacked("Passw0rd", packed) &&
-                          AdminPassword.CheckPacked("Passw0rd", packed2) &&
-                          !AdminPassword.CheckPacked("passw0rd", packed) &&
-                          !AdminPassword.CheckPacked("Passw0rd ", packed) &&
-                          !AdminPassword.CheckPacked("Passw0rd", new byte[] { 1, 2, 3 }) &&
-                          !SameBytes(packed, packed2) && salt.Length == 16;
-                sb.AppendLine("Password guard: " + (ok ? "OK" : "FAIL"));
+                bool hash = AdminPassword.CheckPacked("Passw0rd", packed) &&
+                            AdminPassword.CheckPacked("Passw0rd", packed2) &&
+                            !AdminPassword.CheckPacked("passw0rd", packed) &&
+                            !AdminPassword.CheckPacked("Passw0rd ", packed) &&
+                            !AdminPassword.CheckPacked("Passw0rd", new byte[] { 1, 2, 3 }) &&
+                            !SameBytes(packed, packed2) && salt.Length == 16;
+                bool policy = AdminPassword.MatchesPolicy("Passw0rd") &&
+                              AdminPassword.MatchesPolicy("Abc123") &&
+                              !AdminPassword.MatchesPolicy("Pw0rd") &&
+                              !AdminPassword.MatchesPolicy("passw0rd") &&
+                              !AdminPassword.MatchesPolicy("PASSW0RD") &&
+                              !AdminPassword.MatchesPolicy("PasswrD") &&
+                              !AdminPassword.MatchesPolicy("АБвГ123") &&
+                              !AdminPassword.MatchesPolicy("") && !AdminPassword.MatchesPolicy(null);
+                bool code = AdminPassword.CheckCode("odmin") &&
+                            AdminPassword.CheckCode("ODMIN") &&
+                            AdminPassword.CheckCode(" odmin ") &&
+                            !AdminPassword.CheckCode("admin") &&
+                            !AdminPassword.CheckCode("odmi") &&
+                            !AdminPassword.CheckCode("");
+                sb.AppendLine("Password guard: " + (hash && policy && code ? "OK" : "FAIL"));
             }
             catch (Exception ex)
             {
