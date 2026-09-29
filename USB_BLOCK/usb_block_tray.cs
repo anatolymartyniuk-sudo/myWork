@@ -701,7 +701,7 @@ namespace UsbBlockTray
             return Encoding.UTF8.GetString(bytes);
         }
 
-        private static void RestrictAcl(string path)
+        internal static void RestrictAcl(string path)
         {
             try
             {
@@ -719,6 +719,144 @@ namespace UsbBlockTray
             }
             catch
             {
+            }
+        }
+    }
+
+    // =====================================================================
+    // Пароль защиты опасных пунктов меню (2, 3, 4, 6, 7, 8, 9).
+    // Устанавливается при пункте 7 «Установить службу мониторинга»: сначала
+    // вопрос «установить пароль?», при «Да» - ввод пароля с подтверждением.
+    // После этого пароль запрашивается перед пунктами 2, 3, 4, 6, 8, 9.
+    // Сам пароль НЕ хранится: в файле только PBKDF2-хэш (HMAC-SHA256,
+    // 20000 итераций, случайная соль 16 байт). Файл закрыт DPAPI
+    // LocalMachine и ACL - читается только администратором/SYSTEM, как
+    // whitelist.dat. Забытый пароль восстановить нельзя (и нельзя сбросить):
+    // при его установке выводится предупреждение.
+    // =====================================================================
+    public static class AdminPassword
+    {
+        private const int Iterations = 20000;
+        private const int SaltLen = 16;
+        private const int HashLen = 32;
+        public const int MinLength = 4;
+
+        private static readonly byte[] Magic =
+            { (byte)'U', (byte)'S', (byte)'B', (byte)'W', (byte)'P', 1 };
+
+        private static readonly byte[] Entropy =
+        {
+            0x55, 0x53, 0x42, 0x5F, 0x41, 0x44, 0x4D, 0x49, 0x4E,
+            0x50, 0x57, 0x44, 0x00, 0x7C, 0x54, 0x91
+        };
+
+        public static string FilePath
+        {
+            get { return Path.Combine(StorePaths.Directory, "adminpass.dat"); }
+        }
+
+        public static bool IsSet()
+        {
+            try { return File.Exists(FilePath); }
+            catch { return false; }
+        }
+
+        // Запись пароля в виде байтов: сигнатура + число итераций + соль +
+        // хэш. Ничего не пишет на диск - используется и при установке
+        // пароля, и в --selftest.
+        internal static byte[] PackRecord(string password, out byte[] salt)
+        {
+            salt = new byte[SaltLen];
+            using (RandomNumberGenerator rng = RandomNumberGenerator.Create())
+                rng.GetBytes(salt);
+            byte[] hash = Derive(password, salt, Iterations);
+            using (MemoryStream ms = new MemoryStream())
+            {
+                ms.Write(Magic, 0, Magic.Length);
+                ms.Write(BitConverter.GetBytes(Iterations), 0, 4);
+                ms.Write(salt, 0, salt.Length);
+                ms.Write(hash, 0, hash.Length);
+                return ms.ToArray();
+            }
+        }
+
+        // Проверка пароля по распакованной записи (без DPAPI и без файла).
+        internal static bool CheckPacked(string password, byte[] plain)
+        {
+            try
+            {
+                if (plain == null || plain.Length < Magic.Length + 4 + SaltLen + HashLen)
+                    return false;
+                for (int i = 0; i < Magic.Length; i++)
+                {
+                    if (plain[i] != Magic[i]) return false; // неверная сигнатура
+                }
+                int iterations = BitConverter.ToInt32(plain, Magic.Length);
+                if (iterations < 1000) iterations = Iterations;
+                int off = Magic.Length + 4;
+                byte[] salt = new byte[SaltLen];
+                byte[] hash = new byte[HashLen];
+                Array.Copy(plain, off, salt, 0, SaltLen);
+                Array.Copy(plain, off + SaltLen, hash, 0, HashLen);
+                return FixedTimeEquals(Derive(password, salt, iterations), hash);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static byte[] Derive(string password, byte[] salt, int iterations)
+        {
+            using (Rfc2898DeriveBytes pbkdf2 =
+                new Rfc2898DeriveBytes(password ?? string.Empty, salt, iterations,
+                    HashAlgorithmName.SHA256))
+            {
+                return pbkdf2.GetBytes(HashLen);
+            }
+        }
+
+        // Сравнение за постоянное время - иначе по замеру можно было бы
+        // подбирать хэш побайтно.
+        private static bool FixedTimeEquals(byte[] a, byte[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length) return false;
+            int diff = 0;
+            for (int i = 0; i < a.Length; i++) diff |= a[i] ^ b[i];
+            return diff == 0;
+        }
+
+        public static void Set(string password)
+        {
+            if (string.IsNullOrEmpty(password) || password.Length < MinLength)
+                throw new ArgumentException(
+                    "Пароль должен быть не короче " + MinLength + " символов.");
+
+            byte[] salt;
+            byte[] plain = PackRecord(password, out salt);
+            byte[] secret = ProtectedData.Protect(plain, Entropy,
+                DataProtectionScope.LocalMachine);
+
+            Directory.CreateDirectory(StorePaths.Directory);
+            File.WriteAllBytes(FilePath, secret);
+            WhitelistStore.RestrictAcl(FilePath);
+        }
+
+        // Проверка введённого пароля. Если файл не читается (повреждён или
+        // нет прав) - пароль НЕ пропускается: иначе его можно было бы обойти,
+        // удалив или подменив файл.
+        public static bool Verify(string password)
+        {
+            try
+            {
+                byte[] raw = File.ReadAllBytes(FilePath);
+                byte[] plain = ProtectedData.Unprotect(raw, Entropy,
+                    DataProtectionScope.LocalMachine);
+                return CheckPacked(password, plain);
+            }
+            catch
+            {
+                return false;
             }
         }
     }
@@ -2611,6 +2749,125 @@ namespace UsbBlockTray
         }
     }
 
+    // Ввод пароля защиты: одно поле (проверка) или два с подтверждением
+    // (установка нового). Возвращает DialogResult.OK только если пароль
+    // введён (и, для установки, подтверждён).
+    public sealed class PasswordForm : Form
+    {
+        private readonly bool _confirm;
+        private readonly System.Windows.Forms.TextBox _tbPass;
+        private readonly System.Windows.Forms.TextBox _tbRepeat;
+        public string Password { get; private set; }
+
+        public PasswordForm(string caption, string prompt, bool confirm)
+        {
+            _confirm = confirm;
+
+            int topPass = confirm ? 78 : 70;
+            int topRepeat = topPass + 50;
+            int topButtons = (confirm ? topRepeat : topPass) + 36;
+            string minLen = AdminPassword.MinLength.ToString(CultureInfo.InvariantCulture);
+
+            this.Text = caption;
+            this.StartPosition = FormStartPosition.CenterScreen;
+            this.FormBorderStyle = FormBorderStyle.FixedDialog;
+            this.MaximizeBox = false;
+            this.MinimizeBox = false;
+            this.ShowInTaskbar = false;
+            this.ClientSize = new Size(470, topButtons + 44);
+            this.Font = new Font("Segoe UI", 9f);
+
+            Label lbl = new Label();
+            lbl.Text = prompt;
+            lbl.AutoSize = false;
+            lbl.Size = new Size(446, 40);
+            lbl.Location = new Point(12, 10);
+
+            Label lblPass = new Label();
+            lblPass.Text = confirm
+                ? "Новый пароль (не короче " + minLen + " символов):"
+                : "Пароль:";
+            lblPass.AutoSize = true;
+            lblPass.Location = new Point(12, topPass - 20);
+
+            _tbPass = new System.Windows.Forms.TextBox();
+            _tbPass.UseSystemPasswordChar = true;
+            _tbPass.SetBounds(12, topPass, 446, 24);
+
+            Label lblRepeat = new Label();
+            lblRepeat.Text = "Повторите пароль:";
+            lblRepeat.AutoSize = true;
+            lblRepeat.Visible = confirm;
+            lblRepeat.Location = new Point(12, topRepeat - 20);
+
+            _tbRepeat = new System.Windows.Forms.TextBox();
+            _tbRepeat.UseSystemPasswordChar = true;
+            _tbRepeat.Visible = confirm;
+            _tbRepeat.SetBounds(12, topRepeat, 446, 24);
+
+            Button ok = new Button();
+            ok.Text = "ОК";
+            ok.Size = new Size(110, 28);
+            ok.Location = new Point(240, topButtons);
+            ok.Click += delegate { Commit(); };
+
+            Button cancel = new Button();
+            cancel.Text = "Отмена";
+            cancel.Size = new Size(110, 28);
+            cancel.Location = new Point(358, topButtons);
+            cancel.DialogResult = DialogResult.Cancel;
+
+            this.Controls.Add(lbl);
+            this.Controls.Add(lblPass);
+            this.Controls.Add(_tbPass);
+            this.Controls.Add(lblRepeat);
+            this.Controls.Add(_tbRepeat);
+            this.Controls.Add(ok);
+            this.Controls.Add(cancel);
+            this.CancelButton = cancel;
+            this.AcceptButton = ok;
+
+            this.Shown += delegate { _tbPass.Focus(); };
+        }
+
+        private void Commit()
+        {
+            string pass = _tbPass.Text ?? string.Empty;
+            if (pass.Length == 0)
+            {
+                MessageBox.Show("Введите пароль.", Program.Title,
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                _tbPass.Focus();
+                return;
+            }
+
+            if (_confirm)
+            {
+                if (pass.Length < AdminPassword.MinLength)
+                {
+                    MessageBox.Show("Пароль должен быть не короче " +
+                        AdminPassword.MinLength.ToString(CultureInfo.InvariantCulture) +
+                        " символов.", Program.Title,
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    _tbPass.Focus();
+                    return;
+                }
+                if (!string.Equals(pass, _tbRepeat.Text ?? string.Empty, StringComparison.Ordinal))
+                {
+                    MessageBox.Show("Пароли не совпадают.", Program.Title,
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    _tbRepeat.Focus();
+                    _tbRepeat.SelectAll();
+                    return;
+                }
+            }
+
+            Password = pass;
+            this.DialogResult = DialogResult.OK;
+            this.Close();
+        }
+    }
+
     // Просмотр whitelist: вывод разрешённых накопителей с меткой (именем) тома
     public sealed class WhitelistViewForm : Form
     {
@@ -3178,6 +3435,7 @@ namespace UsbBlockTray
         private void DoUnblock()
         {
             if (!EnsureAdmin()) return;
+            if (!EnsurePassword()) return;
             try
             {
                 PolicyManager.SetBlocked(false);
@@ -3206,6 +3464,7 @@ namespace UsbBlockTray
         private void DoAddDevice()
         {
             if (!EnsureAdmin()) return;
+            if (!EnsurePassword()) return;
 
             List<StorageDevice> devices = BuildAddDeviceList();
             if (devices.Count == 0)
@@ -3400,6 +3659,7 @@ namespace UsbBlockTray
         private void DoRemoveDevice()
         {
             if (!EnsureAdmin()) return;
+            if (!EnsurePassword()) return;
             try
             {
                 List<DeviceEntry> wl = UsbMonitor.GetWhitelist();
@@ -3549,6 +3809,7 @@ namespace UsbBlockTray
         private void DoImport()
         {
             if (!EnsureAdmin()) return;
+            if (!EnsurePassword()) return;
 
             using (OpenFileDialog dlg = new OpenFileDialog())
             {
@@ -3734,6 +3995,9 @@ namespace UsbBlockTray
                 RefreshServiceMenu();
                 return;
             }
+            // Пароль защиты спрашивается ДО установки службы: отмена в окне
+            // пароля отменяет и установку службы.
+            if (!AskSetPassword()) return;
             try
             {
                 string err = ServiceManager.Install();
@@ -3775,6 +4039,7 @@ namespace UsbBlockTray
         private void DoRemoveService()
         {
             if (!EnsureAdmin()) return;
+            if (!EnsurePassword()) return;
             if (!ServiceManager.IsInstalled())
             {
                 RefreshServiceMenu();
@@ -3813,6 +4078,7 @@ namespace UsbBlockTray
         private void DoUninstall()
         {
             if (!EnsureAdmin()) return;
+            if (!EnsurePassword()) return;
 
             if (MessageBox.Show(
                     "Удалить программу?\n\r" +
@@ -3861,7 +4127,10 @@ namespace UsbBlockTray
             if (Directory.Exists(StorePaths.Directory))
             {
                 if (MessageBox.Show(
-                        "Удалить сохранённый whitelist (список разрешённых устройств)?",
+                        "Удалить сохранённые данные?\n" +
+                        "  - whitelist (список разрешённых устройств)\n" +
+                        "  - пароль защиты меню\n" +
+                        "Без подтверждения эти файлы останутся на месте",
                         Program.Title, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
                 {
                     deleteData = true;
@@ -3964,6 +4233,99 @@ namespace UsbBlockTray
             MessageBox.Show("Требуются права администратора.",
                 Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
+        }
+
+        // =============================================================
+        // Пароль защиты опасных пунктов меню
+        // =============================================================
+        private const int PasswordAttempts = 3;
+
+        // Перед пунктами 2, 3, 4, 6, 8, 9. Если пароль не установлен -
+        // пункт выполняется без запроса.
+        private bool EnsurePassword()
+        {
+            if (!AdminPassword.IsSet()) return true;
+
+            for (int attempt = 1; attempt <= PasswordAttempts; attempt++)
+            {
+                using (PasswordForm f = new PasswordForm("Пароль защиты",
+                    "Введите пароль для доступа к этому пункту меню:", false))
+                {
+                    if (f.ShowDialog() != DialogResult.OK) return false;
+                    if (AdminPassword.Verify(f.Password)) return true;
+                }
+
+                if (attempt < PasswordAttempts)
+                {
+                    MessageBox.Show("Неверный пароль.\nОсталось попыток: " +
+                        (PasswordAttempts - attempt).ToString(CultureInfo.InvariantCulture) + ".",
+                        Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+
+            MessageBox.Show("Превышено число попыток ввода пароля.\nПункт не выполнен.",
+                Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
+
+        // Пункт 7: сначала пароль (установка или смена), потом - установка
+        // службы. false - установка службы отменена пользователем.
+        private bool AskSetPassword()
+        {
+            StringBuilder sb = new StringBuilder();
+            if (AdminPassword.IsSet())
+            {
+                sb.AppendLine("Пароль защиты уже установлен.");
+                sb.AppendLine();
+                sb.AppendLine("Установить новый пароль сейчас?");
+                sb.AppendLine("«Нет» - оставить прежний пароль.");
+            }
+            else
+            {
+                sb.AppendLine("Установить пароль для защиты опасных пунктов меню?");
+                sb.AppendLine();
+                sb.AppendLine("Пароль будет запрашиваться при:");
+                sb.AppendLine("  2 Разблокировать");
+                sb.AppendLine("  3 Добавить устройство");
+                sb.AppendLine("  4 Удалить устройство из whitelist");
+                sb.AppendLine("  6 Импортировать whitelist");
+                sb.AppendLine("  8 Удалить службу мониторинга");
+                sb.AppendLine("  9 Удалить программу");
+                sb.AppendLine();
+                sb.AppendLine("Внимание: пароль нигде не сохраняется - хранится только");
+                sb.AppendLine("его хэш, и сбросить его нечем. Запомните пароль.");
+            }
+
+            if (MessageBox.Show(sb.ToString(), Program.Title,
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                return true;
+
+            using (PasswordForm f = new PasswordForm("Установка пароля",
+                "Задайте пароль для пунктов 2, 3, 4, 6, 8, 9:", true))
+            {
+                if (f.ShowDialog() != DialogResult.OK) return false;
+                try
+                {
+                    AdminPassword.Set(f.Password);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Не удалось сохранить пароль:\n" + ex.Message,
+                        Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return false;
+                }
+            }
+
+            MessageBox.Show("Пароль установлен.\n\n" +
+                "Он будет запрашиваться при пунктах:\n" +
+                "  2 Разблокировать\n" +
+                "  3 Добавить устройство\n" +
+                "  4 Удалить устройство из whitelist\n" +
+                "  6 Импортировать whitelist\n" +
+                "  8 Удалить службу мониторинга\n" +
+                "  9 Удалить программу",
+                Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return true;
         }
 
         private void HandleDeviceChange()
@@ -4674,6 +5036,8 @@ namespace UsbBlockTray
             sb.AppendLine();
             sb.AppendLine("--- Политика ---");
             sb.AppendLine("Блокировка активна: " + PolicyManager.IsBlocked());
+            sb.AppendLine("Пароль защиты меню: " +
+                (AdminPassword.IsSet() ? "установлен" : "не установлен"));
 
             sb.AppendLine();
             sb.AppendLine("--- Whitelist ---");
@@ -5076,7 +5440,36 @@ namespace UsbBlockTray
                 sb.AppendLine("Dedup import ERROR: " + ex.Message);
             }
 
+            // пароль защиты: верный пароль проходит проверку, неверный,
+            // другая соль и испорченная запись - нет (файл при этом не трогается)
+            try
+            {
+                byte[] salt;
+                byte[] packed = AdminPassword.PackRecord("Passw0rd", out salt);
+                byte[] salt2;
+                byte[] packed2 = AdminPassword.PackRecord("Passw0rd", out salt2);
+                bool ok = AdminPassword.CheckPacked("Passw0rd", packed) &&
+                          AdminPassword.CheckPacked("Passw0rd", packed2) &&
+                          !AdminPassword.CheckPacked("passw0rd", packed) &&
+                          !AdminPassword.CheckPacked("Passw0rd ", packed) &&
+                          !AdminPassword.CheckPacked("Passw0rd", new byte[] { 1, 2, 3 }) &&
+                          !SameBytes(packed, packed2) && salt.Length == 16;
+                sb.AppendLine("Password guard: " + (ok ? "OK" : "FAIL"));
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine("Password guard ERROR: " + ex.Message);
+            }
+
             return sb.ToString().Replace(Environment.NewLine, " | ");
+        }
+
+        private static bool SameBytes(byte[] a, byte[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length) return false;
+            for (int i = 0; i < a.Length; i++)
+                if (a[i] != b[i]) return false;
+            return true;
         }
     }
 }

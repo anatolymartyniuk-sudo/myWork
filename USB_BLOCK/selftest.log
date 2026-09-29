@@ -1,1 +1,1 @@
-﻿SELFTEST: Export/import: OK | Payload serialize/deserialize: OK | Volume map (disk->partition->letter): OK (томов: 2) | Merge whitelists (dedup): OK (записей: 3) | Dedup add: OK | Dedup import: OK (файл: 2 из 3, после слияния: 2) | 
+﻿SELFTEST: Export/import: OK | Payload serialize/deserialize: OK | Volume map (disk->partition->letter): OK (томов: 2) | Merge whitelists (dedup): OK (записей: 3) | Dedup add: OK | Dedup import: OK (файл: 2 из 3, после слияния: 2) | Password guard: OK | 

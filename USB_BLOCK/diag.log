@@ -1,6 +1,6 @@
-﻿Файл этого лога: D:\Work\Usb_Block\diag.log
+﻿Файл этого лога: D:\work\USB_BLOCK\diag.log
 USB_Block tray - диагностика
-Время: 09/23/2026 13:56:33
+Время: 09/29/2026 16:18:25
 Администратор: False
 Защищённая копия: C:\Program Files\USB_Block\usb_block_tray.exe  существует=True
 Служба мониторинга: не установлена
@@ -40,6 +40,7 @@ USB_Block tray - диагностика
 
 --- Политика ---
 Блокировка активна: False
+Пароль защиты меню: не установлен
 
 --- Whitelist ---
 Файл: C:\ProgramData\USB_Block\whitelist.dat
@@ -55,10 +56,11 @@ USB_Block tray - диагностика
 Найдено: 0
 
 --- Все масс-сторадж узлы (реестр) ---
-Найдено: 16
+Найдено: 18
   USBSTOR\Disk&Ven_&Prod_USB_Disk&Rev_8.07\CDEE658E&0
   USBSTOR\Disk&Ven_&Prod_USB_DISK_2.0&Rev_PMAP\07011327AC49A566&0
   USBSTOR\Disk&Ven_&Prod_USB_FLASH_DRIVE&Rev_PMAP\071C41215D05A883&0
+  USBSTOR\Disk&Ven_ASolid&Prod_USB&Rev_\32663616&0
   USBSTOR\Disk&Ven_JetFlash&Prod_Transcend_8GB&Rev_1100\081NS9HV47JMZLUQ&0
   USBSTOR\Disk&Ven_JetFlash&Prod_Transcend_8GB&Rev_1100\41KAXI78HFCSUCJF&0
   USBSTOR\Disk&Ven_Kingston&Prod_DataTraveler_2.0&Rev_PMAP\C860008863E7ED801A1100C7&0
@@ -70,5 +72,6 @@ USB_Block tray - диагностика
   USB\VID_1005&PID_B128\071C5564838EC626
   USB\VID_1005&PID_B128\CCYYMMDDHHmmSSW3HSSI
   USB\VID_13FE&PID_4300\07011327AC49A566
+  USB\VID_24A9&PID_205A\32663616
   USB\VID_8564&PID_1000\081NS9HV47JMZLUQ
   USB\VID_8564&PID_1000\41KAXI78HFCSUCJF
