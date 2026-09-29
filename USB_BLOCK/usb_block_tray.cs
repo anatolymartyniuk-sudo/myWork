@@ -2560,7 +2560,9 @@ namespace UsbBlockTray
             this.MaximizeBox = false;
             this.MinimizeBox = false;
             this.ClientSize = new Size(540, 340);
-            this.Font = new Font("Segoe UI", 9f);
+            this.Font = SystemFonts.MessageBoxFont;
+            this.AutoScaleDimensions = new SizeF(7F, 15F);   // метрики Segoe UI 9 пт (проектные)
+            this.AutoScaleMode = AutoScaleMode.Font;
 
             // Какое устройство уже разрешено (в whitelist) - зелёное,
             // остальные (будут/были заблокированы) - красные.
@@ -2738,7 +2740,9 @@ namespace UsbBlockTray
             this.MaximizeBox = false;
             this.MinimizeBox = false;
             this.ClientSize = new Size(620, 420);
-            this.Font = new Font("Segoe UI", 9f);
+            this.Font = SystemFonts.MessageBoxFont;
+            this.AutoScaleDimensions = new SizeF(7F, 15F);   // метрики Segoe UI 9 пт (проектные)
+            this.AutoScaleMode = AutoScaleMode.Font;
 
             Label lbl = new Label();
             lbl.Text = "Выберите устройство для удаления из whitelist:\n" +
@@ -2839,7 +2843,9 @@ namespace UsbBlockTray
             this.MinimizeBox = false;
             this.ShowInTaskbar = false;
             this.ClientSize = new Size(470, topButtons + 60);
-            this.Font = new Font("Segoe UI", 9f);
+            this.Font = SystemFonts.MessageBoxFont;
+            this.AutoScaleDimensions = new SizeF(7F, 15F);   // метрики Segoe UI 9 пт (проектные)
+            this.AutoScaleMode = AutoScaleMode.Font;
 
             Label lbl = new Label();
             lbl.Text = prompt;
@@ -2943,7 +2949,9 @@ namespace UsbBlockTray
             this.MaximizeBox = false;
             this.MinimizeBox = false;
             this.ClientSize = new Size(660, 460);
-            this.Font = new Font("Segoe UI", 9f);
+            this.Font = SystemFonts.MessageBoxFont;
+            this.AutoScaleDimensions = new SizeF(7F, 15F);   // метрики Segoe UI 9 пт (проектные)
+            this.AutoScaleMode = AutoScaleMode.Font;
 
             Label lbl = new Label();
             lbl.Text = "Разрешённых устройств: " +
@@ -3343,95 +3351,6 @@ namespace UsbBlockTray
             TickScan();
         }
 
-        // Оформление контекстного меню: общий фон - небесноголубой, левый
-        // вертикальный бордюр - синий, поле статуса блокировки - жёлтое.
-        // Цвета пунктов меню задать нельзя (WinForms рисует ToolStrip через
-        // ToolStripRenderer, свойства BackColor/ForeColor игнорируются), поэтому
-        // фон, бордюр и подложка статуса рисуются вручную.
-        private sealed class MenuSkin : ToolStripProfessionalRenderer
-        {
-            public static readonly Color MenuBack = Color.FromArgb(135, 206, 250);
-            public static readonly Color StatusBack = Color.Yellow;
-            public static readonly Color BorderColor = Color.Blue;
-            private static readonly Color SelectedBack = Color.FromArgb(150, 215, 250);
-            private static readonly Color SelectedLine = Color.FromArgb(0, 90, 158);
-
-            private readonly ToolStripItem _status;
-
-            public MenuSkin(ToolStripItem status)
-                : base(new MenuColors())
-            {
-                _status = status;
-            }
-
-            // Общий фон меню (за пунктами и разделителями).
-            protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
-            {
-                using (SolidBrush b = new SolidBrush(MenuBack))
-                    e.Graphics.FillRectangle(b, e.AffectedBounds);
-            }
-
-            // Синяя линия 2 px по левому краю меню поверх обычной рамки.
-            protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
-            {
-                base.OnRenderToolStripBorder(e);
-
-                Rectangle r = e.ToolStrip.ClientRectangle;
-                if (r.Width < 3)
-                    return;
-
-                using (Pen p = new Pen(BorderColor, 2f))
-                    e.Graphics.DrawLine(p, r.Left + 1, r.Top, r.Left + 1, r.Bottom);
-            }
-
-            // Подложка пункта: у поля статуса - жёлтая, у остальных -
-            // небесноголубой, у выбранного/нажатого - рамка выделения.
-            protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
-            {
-                // AffectedBounds у ToolStripItemRenderEventArgs внутренний,
-                // у пункта меню он совпадает с Bounds (пункт растянут на всю
-                // ширину меню).
-                Rectangle r = e.Item.Bounds;
-                Color back = object.ReferenceEquals(e.Item, _status) ? StatusBack : MenuBack;
-                using (SolidBrush b = new SolidBrush(back))
-                    e.Graphics.FillRectangle(b, r);
-
-                if (e.Item.Selected || e.Item.Pressed)
-                {
-                    using (SolidBrush b = new SolidBrush(SelectedBack))
-                        e.Graphics.FillRectangle(b, r);
-                    using (Pen p = new Pen(SelectedLine))
-                        e.Graphics.DrawRectangle(p, r.X, r.Y, r.Width - 1, r.Height - 1);
-                }
-            }
-
-            // Разделители: линия по цвету небесноголубого, чтобы полосы не
-            // выглядели пустыми.
-            protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
-            {
-                using (SolidBrush b = new SolidBrush(MenuBack))
-                    e.Graphics.FillRectangle(b, e.Item.Bounds);
-
-                e.Graphics.DrawLine(
-                    new Pen(Color.FromArgb(100, 170, 220)),
-                    e.Item.Width / 6, e.Item.Height / 2,
-                    e.Item.Width - e.Item.Width / 6 - 1, e.Item.Height / 2);
-            }
-
-            // Палитра Professional: тот же фон, выделение - чуть темнее.
-            private sealed class MenuColors : ProfessionalColorTable
-            {
-                public override Color MenuBorder { get { return Color.FromArgb(120, 190, 235); } }
-                public override Color MenuItemBorder { get { return SelectedLine; } }
-                public override Color MenuItemSelected { get { return SelectedBack; } }
-                public override Color MenuItemSelectedGradientBegin { get { return SelectedBack; } }
-                public override Color MenuItemSelectedGradientEnd { get { return SelectedBack; } }
-                public override Color MenuItemPressedGradientBegin { get { return SelectedBack; } }
-                public override Color MenuItemPressedGradientEnd { get { return SelectedBack; } }
-                public override Color ToolStripDropDownBackground { get { return MenuBack; } }
-            }
-        }
-
         private void BuildMenu()
         {
             _menu = new ContextMenuStrip();
@@ -3441,8 +3360,14 @@ namespace UsbBlockTray
             ApplyStatusColor();
             _menu.Items.Add(new ToolStripSeparator());
 
-            _menu.Renderer = new MenuSkin(_miStatus);
-            _menu.RenderMode = ToolStripRenderMode.Professional;
+            // Меню рисует сама Windows (RenderMode.System): цвета, размеры и
+            // шрифт пунктов берутся из системной темы, свой Renderer не
+            // задаётся.
+            // ВАЖНО (ошибка этапа 68): сеттер RenderMode сбрасывает Renderer
+            // на штатный, поэтому наоборот - сначала Renderer, потом
+            // RenderMode - нельзя: свой Renderer молча исчезал, и меню
+            // выглядело как обычное системное.
+            _menu.RenderMode = ToolStripRenderMode.System;
 
             // Не администратор (например, запуск задачи Планировщика при входе
             // обычного пользователя): управление настройками недоступно - только
@@ -4979,8 +4904,10 @@ namespace UsbBlockTray
             this.StartPosition = FormStartPosition.Manual;
             this.ShowInTaskbar = false;
             this.TopMost = true;
-            this.Font = new Font("Segoe UI", 9f);
-            this.BackColor = Color.FromArgb(255, 245, 225);
+            this.Font = SystemFonts.MessageBoxFont;
+            this.AutoScaleDimensions = new SizeF(7F, 15F);   // метрики Segoe UI 9 пт (проектные)
+            this.AutoScaleMode = AutoScaleMode.Font;
+            this.BackColor = SystemColors.Control;
 
             _textSize = TextRenderer.MeasureText(text, this.Font,
                 new Size(350, int.MaxValue), TextFormatFlags.WordBreak);
@@ -4991,7 +4918,7 @@ namespace UsbBlockTray
             _lbl.Text = text;
             _lbl.Size = new Size(w, h);
             _lbl.Font = this.Font;
-            _lbl.ForeColor = Color.FromArgb(0, 51, 102);
+            _lbl.ForeColor = SystemColors.ControlText;
             _lbl.Location = new Point(14, 12);
             this.Controls.Add(_lbl);
 
