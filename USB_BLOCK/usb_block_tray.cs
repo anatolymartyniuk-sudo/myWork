@@ -46,6 +46,7 @@ namespace UsbBlockTray
             bool logon = false;
             bool notify = false;
             bool testpopup = false;
+            bool journal = false;
 
             foreach (string a in args)
             {
@@ -70,6 +71,43 @@ namespace UsbBlockTray
                 if (string.Equals(a, "--testpopup", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(a, "-testpopup", StringComparison.OrdinalIgnoreCase))
                     testpopup = true;
+                if (string.Equals(a, "--journal", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(a, "-journal", StringComparison.OrdinalIgnoreCase))
+                    journal = true;
+            }
+
+            // ПРОСМОТР ЖУРНАЛА (--journal): только окно, без трея, без
+            // мьютекса и без задач - процесс живёт ровно пока открыто окно.
+            // Журнал зашифрован и закрыт ACL, поэтому читает его только
+            // администратор; от обычного пользователя права поднимаются
+            // здесь и запускается второй такой же процесс.
+            if (journal)
+            {
+                if (!IsAdministrator())
+                {
+                    if (!StartJournalViewer(true))
+                    {
+                        MessageBox.Show("Журнал закрыт от обычного пользователя.\n" +
+                            "Не удалось получить права администратора.",
+                            Title, MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
+                    }
+                    return 0;
+                }
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                try
+                {
+                    using (JournalViewForm view = new JournalViewForm())
+                    {
+                        view.ShowDialog();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Не удалось открыть журнал: " + ex.Message,
+                        Title, MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
+                }
+                return 0;
             }
 
             // Самопроверка показа всплывающих сообщений: показывает два окна-
@@ -288,6 +326,25 @@ namespace UsbBlockTray
                 return principal.IsInRole(WindowsBuiltInRole.Administrator);
             }
         }
+
+        // Запуск отдельного процесса только с окном журнала (--journal).
+        // elevate=true - с запросом прав администратора.
+        public static bool StartJournalViewer(bool elevate)
+        {
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo(
+                    Application.ExecutablePath, "--journal");
+                psi.UseShellExecute = true;
+                if (elevate) psi.Verb = "runas";
+                Process.Start(psi);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
     }
 
     // =====================================================================
@@ -444,6 +501,30 @@ namespace UsbBlockTray
         public static string File
         {
             get { return Path.Combine(Directory, "whitelist.dat"); }
+        }
+
+        // ---- Журнал подключений и копирований ----
+        // Лежит РЯДОМ с whitelist.dat (та же папка ProgramData\USB_Block) и
+        // так же закрыт от обычного пользователя: содержимое зашифровано
+        // (DPAPI LocalMachine, UsbJournal), файл закрыт ACL. В файле журнала
+        // видны только имена накопителей и пути скопированных файлов, но не
+        // содержимое самих файлов.
+        public static string JournalFile
+        {
+            get { return Path.Combine(Directory, "journal.dat"); }
+        }
+
+        // Текущее поколение журнала (текущий файл) и предыдущие:
+        // journal.dat (текущий), journal_1.dat ... journal_9.dat (старые).
+        // При переполнении текущего файла поколения сдвигаются, самый старый
+        // удаляется - журнал живёт кольцом, размер ограничен.
+        public static int JournalGenerations = 9;
+
+        public static string JournalGenerationFile(int generation)
+        {
+            if (generation <= 0) return JournalFile;
+            return Path.Combine(Directory, "journal_" +
+                generation.ToString(CultureInfo.InvariantCulture) + ".dat");
         }
     }
 
@@ -2380,18 +2461,1219 @@ namespace UsbBlockTray
     }
 
     // =====================================================================
-    // Скрытое окно для ловли WM_DEVICECHANGE
+    // ЖУРНАЛ подключений накопителей и копируемых на них файлов.
+    // Файл journal.dat лежит РЯДОМ с whitelist.dat (C:\ProgramData\USB_Block)
+    // и закрыт от обычного пользователя ДВОЯКО:
+    //   1) каждая запись зашифрована (DPAPI LocalMachine, своя соль);
+    //   2) на файл и на папку выставлен ACL (Администраторы + SYSTEM),
+    //      тот же приём, что на whitelist.dat.
+    // Содержимое скопированных файлов в журнале НЕ хранится - только
+    // время, вид операции, путь, размер и сведения о накопителе.
+    //
+    // Формат файла:
+    //   [8 байт "USBJRNL1"][ запись ][ запись ] ...
+    //   запись = [uint32 длина][зашифрованный UTF-8 текст записи]
+    // Записи только дописываются, поэтому файл можно открыть на Append и
+    // не перешивать всё заново (важно: шифрование каждой записи стоит
+    // дорого, перешивать весь журнал на каждом цикле нельзя).
+    // Переполнение: RecordsPerFile записей -> сдвиг поколений
+    // (journal.dat -> journal_1.dat -> ... -> journal_9.dat), старый
+    // удаляется. Читается сначала текущий файл, потом поколения по
+    // убыванию свежести.
+    // =====================================================================
+    public static class UsbJournal
+    {
+        private const string Magic = "USBJRNL1";
+
+        // Записей в текущем файле до ротации. Внутреннее поле - только чтобы
+        // самопроверка могла проверить ротацию на маленьком значении.
+        internal static int MaxRecordsPerFile = 10000;
+
+        // Соль DPAPI. Как и у whitelist.dat, шифрование не мешает админу
+        // прочитать журнал - защиту от обычного пользователя даёт ACL.
+        private static readonly byte[] Entropy = new byte[]
+        {
+            0x55, 0x53, 0x42, 0x5F, 0x4A, 0x52, 0x4E, 0x4C,
+            0x5F, 0x56, 0x31, 0x00, 0x2E, 0x13, 0x65, 0xA7
+        };
+
+        // Запись журнала: время, вид операции и подробности.
+        public const string KindDeviceAdded = "DEV+";   // накопитель подключён
+        public const string KindDeviceRemoved = "DEV-"; // накопитель отключён
+        public const string KindDeviceFound = "DEV=";  // найден при запуске журнала
+        public const string KindFileAdded = "FILE+";   // файл появился (копирование)
+        public const string KindFileChanged = "FILE~"; // файл изменён (дописан)
+        public const string KindFileRemoved = "FILE-"; // файл удалён
+        public const string KindFileRenamed = "FILE>"; // файл переименован/перенесён
+        public const string KindNote = "SYS";         // служебная запись журнала
+
+        // Последняя ошибка записи/чтения - для диагностики.
+        public static string LastError;
+
+        // Папка журнала. По умолчанию - ProgramData\USB_Block рядом с
+        // whitelist.dat. Переопределяется ТОЛЬКО на время самопроверки
+        // (--selftest), чтобы проверки писали во временную папку, а не в
+        // настоящий журнал машины.
+        private static string _dirOverride;
+        private static bool _testMode;
+
+        public static void UseDirectoryForTest(string dir)
+        {
+            _dirOverride = dir;
+            _testMode = dir != null;
+            ResetCountForTest();
+        }
+
+        private static string Dir
+        {
+            get { return _dirOverride ?? StorePaths.Directory; }
+        }
+
+        private static string CurrentFile()
+        {
+            return Path.Combine(Dir, "journal.dat");
+        }
+
+        // Текущий файл журнала (с учётом переопределения папки в --selftest).
+        public static string CurrentPath
+        {
+            get { return CurrentFile(); }
+        }
+
+        private static string GenerationFile(int generation)
+        {
+            if (generation <= 0) return CurrentFile();
+            return Path.Combine(Dir, "journal_" +
+                generation.ToString(CultureInfo.InvariantCulture) + ".dat");
+        }
+
+        // Сколько записей в текущем файле (без расшифровки - только по
+        // заголовкам длин, поэтому дёшево).
+        public static int CurrentRecordCount()
+        {
+            try
+            {
+                return CountRecords(CurrentFile());
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        public static int TotalRecordCount()
+        {
+            int total = 0;
+            for (int g = 0; g <= StorePaths.JournalGenerations; g++)
+            {
+                try
+                {
+                    total += CountRecords(GenerationFile(g));
+                }
+                catch
+                {
+                }
+            }
+            return total;
+        }
+
+        public static long TotalSizeBytes()
+        {
+            long total = 0;
+            for (int g = 0; g <= StorePaths.JournalGenerations; g++)
+            {
+                try
+                {
+                    string f = GenerationFile(g);
+                    if (File.Exists(f)) total += new FileInfo(f).Length;
+                }
+                catch
+                {
+                }
+            }
+            return total;
+        }
+
+        // Дописать одну запись. kind - вид операции (см. константы выше),
+        // detail - подробности без времени и вида (вид отделён табуляцией).
+        public static void Write(string kind, string detail)
+        {
+            if (string.IsNullOrEmpty(kind)) return;
+            string when = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss",
+                CultureInfo.InvariantCulture);
+            string text = when + "\t" + kind + "\t" + (detail ?? string.Empty);
+            WriteRaw(text);
+        }
+
+        public static void WriteRaw(string text)
+        {
+            byte[] plain = new UTF8Encoding(false).GetBytes(text);
+            byte[] cipher;
+            try
+            {
+                cipher = ProtectedData.Protect(plain, Entropy, DataProtectionScope.LocalMachine);
+            }
+            catch (Exception ex)
+            {
+                LastError = "шифрование: " + ex.Message;
+                return;
+            }
+
+            try
+            {
+                Directory.CreateDirectory(Dir);
+            }
+            catch
+            {
+            }
+
+            string path = CurrentFile();
+            try
+            {
+                // Ротация - до подсчёта: она освобождает journal.dat, и новый
+                // файл надо будет и создать, и закрыть ACL заново.
+                RotateIfFull();
+
+                bool created = false;
+                using (FileStream fs = new FileStream(path, FileMode.OpenOrCreate,
+                    FileAccess.Write, FileShare.ReadWrite))
+                {
+                    created = fs.Length == 0;
+                    if (created)
+                    {
+                        fs.Write(new UTF8Encoding(false).GetBytes(Magic), 0, Magic.Length);
+                    }
+                    else
+                    {
+                        fs.Seek(0, SeekOrigin.End);
+                    }
+                    byte[] len = BitConverter.GetBytes(cipher.Length);
+                    fs.Write(len, 0, 4);
+                    fs.Write(cipher, 0, cipher.Length);
+                    fs.Flush();
+                }
+                if (created && !_testMode)
+                {
+                    // Файл создан - сразу закрываем ACL, как у whitelist.dat.
+                    // В самопроверке папка временная и принадлежит текущему
+                    // пользователю: закрывать её нельзя, иначе проверка
+                    // прочитала бы файл не смогла бы (а проверять надо именно
+                    // чтение).
+                    WhitelistStore.RestrictAcl(path);
+                }
+                _count++;
+                _countLoaded = true;
+            }
+            catch (Exception ex)
+            {
+                LastError = "запись: " + ex.Message;
+            }
+        }
+
+        // Сколько записей уже в текущем файле. Держим счётчик в памяти:
+        // пересчитывать файл на КАЖДУЮ запись нельзя - при массовом
+        // копировании это даёт квадратичную работу на тысячах файлов.
+        private static int _count;
+        private static bool _countLoaded;
+
+        private static int CurrentCount()
+        {
+            if (!_countLoaded)
+            {
+                _count = CountRecords(CurrentFile());
+                _countLoaded = true;
+            }
+            return _count;
+        }
+
+        // Сброс счётчика при смене папки (самопроверка) - иначе счётчик от
+        // прежнего журнала мешал бы определить момент ротации.
+        public static void ResetCountForTest()
+        {
+            _count = 0;
+            _countLoaded = false;
+        }
+
+        // Текущий файл полон - сдвигаем поколения. Удаляем самый старый,
+        // затем переименовываем остальные на шаг назад и освобождаем
+        // journal.dat под текущий.
+        private static void RotateIfFull()
+        {
+            string path = CurrentFile();
+            if (CurrentCount() < MaxRecordsPerFile) return;
+            try
+            {
+                int last = StorePaths.JournalGenerations;
+                try { if (File.Exists(GenerationFile(last))) File.Delete(GenerationFile(last)); }
+                catch { }
+                for (int g = last - 1; g >= 1; g--)
+                {
+                    string from = GenerationFile(g);
+                    if (!File.Exists(from)) continue;
+                    string to = GenerationFile(g + 1);
+                    try { File.Delete(to); } catch { }
+                    File.Move(from, to);
+                }
+                string cur = GenerationFile(1);
+                try { if (File.Exists(cur)) File.Delete(cur); } catch { }
+                File.Move(path, cur);
+                _count = 0;
+                _countLoaded = true;
+            }
+            catch (Exception ex)
+            {
+                LastError = "ротация: " + ex.Message;
+                // Счётчик не доверяем: сдвиг мог не дойти до конца.
+                _countLoaded = false;
+            }
+        }
+
+        private static int CountRecords(string path)
+        {
+            if (!File.Exists(path)) return 0;
+            int count = 0;
+            using (FileStream fs = new FileStream(path, FileMode.Open,
+                FileAccess.Read, FileShare.ReadWrite))
+            {
+                byte[] magic = new byte[Magic.Length];
+                if (fs.Read(magic, 0, magic.Length) != magic.Length) return 0;
+                for (int i = 0; i < magic.Length; i++)
+                    if (magic[i] != (byte)Magic[i]) return 0;
+                byte[] len = new byte[4];
+                while (true)
+                {
+                    if (fs.Read(len, 0, 4) != 4) break;
+                    int n = unchecked((int)BitConverter.ToUInt32(len, 0));
+                    if (n <= 0 || n > fs.Length - fs.Position) break;
+                    fs.Position += n;
+                    count++;
+                }
+            }
+            return count;
+        }
+
+        // ---- Чтение ----
+
+        // Все записи журнала, свежие сверху. limit ограничивает выдачу,
+        // чтобы окно просмотра не тянуло в память весь архив.
+        public static List<string> ReadRecent(int limit)
+        {
+            List<string> lines = new List<string>();
+            for (int g = 0; g <= StorePaths.JournalGenerations; g++)
+            {
+                if (limit > 0 && lines.Count >= limit) break;
+                string path = GenerationFile(g);
+                if (!File.Exists(path)) continue;
+                List<string> part;
+                try
+                {
+                    part = ReadFile(path, limit > 0 ? limit - lines.Count : 0);
+                }
+                catch
+                {
+                    continue;
+                }
+                // Внутри файла записи идут от старых к новым, а показывать
+                // надо свежими сверху - разворачиваем.
+                for (int i = part.Count - 1; i >= 0; i--)
+                {
+                    lines.Add(part[i]);
+                    if (limit > 0 && lines.Count >= limit) break;
+                }
+            }
+            return lines;
+        }
+
+        private static List<string> ReadFile(string path, int limit)
+        {
+            List<string> result = new List<string>();
+            using (FileStream fs = new FileStream(path, FileMode.Open,
+                FileAccess.Read, FileShare.ReadWrite))
+            {
+                byte[] magic = new byte[Magic.Length];
+                if (fs.Read(magic, 0, magic.Length) != magic.Length) return result;
+                for (int i = 0; i < magic.Length; i++)
+                    if (magic[i] != (byte)Magic[i])
+                        throw new IOException("повреждён заголовок файла журнала");
+                byte[] len = new byte[4];
+                while (true)
+                {
+                    if (limit > 0 && result.Count >= limit) break;
+                    if (fs.Read(len, 0, 4) != 4) break;
+                    int n = unchecked((int)BitConverter.ToUInt32(len, 0));
+                    if (n <= 0 || n > fs.Length - fs.Position) break;
+                    byte[] cipher = new byte[n];
+                    if (fs.Read(cipher, 0, n) != n) break;
+                    byte[] plain = ProtectedData.Unprotect(cipher, Entropy, DataProtectionScope.LocalMachine);
+                    result.Add(new UTF8Encoding(false).GetString(plain));
+                }
+            }
+            return result;
+        }
+
+        // Удаление журнала (пункт «Удалить сохранённые данные?»).
+        public static void Clear()
+        {
+            for (int g = 0; g <= StorePaths.JournalGenerations; g++)
+            {
+                try
+                {
+                    string f = GenerationFile(g);
+                    if (File.Exists(f)) File.Delete(f);
+                }
+                catch
+                {
+                }
+            }
+            LastError = null;
+        }
+    }
+
+    // =====================================================================
+    // НАБЛЮДЕНИЕ ДЛЯ ЖУРНАЛА. Кто именно ведёт журнал, решает мьютекс:
+    // раньше успевает тот, кто работает чаще. Если служба установлена и
+    // работает, журна�� ведёт она (цикл 2 с); если службы нет или она
+    // остановлена - журнал ведёт администраторский трей (цикл 3 с).
+    // Двух писателей одновременно не будет: цикл под мьютексом.
+    //
+    // ЧТО ПИШЕТСЯ В ЖУРНАЛ
+    // 1) Подключение и отключение ЛЮБОГО USB-накопителя (и разрешённого,
+    //    и постороннего). Состояние "что сейчас подключено" хранится в
+    //    HKLM (машино-широко), поэтому служба и трей не путают друг друга
+    //    и повторно на тот же накопитель не пишут.
+    // 2) Изменения файлов на РАЗРЕШЁННЫХ накопителях с буквой диска:
+    //    опрос дерева каталогов и сравнение со снимком. На посторонний
+    //    накопитель файлы скопировать нельзя - у него снята буква, - поэтому
+    //    он в файловой части журнала не участвует.
+    //
+    // ГРАНИЦЫ ОПРОСА (важно для честности журнала)
+    // - Первое появление тома - это БАЗОВОЕ состояние, оно молча
+    //   сохраняется и в журнал НЕ пишется. Иначе подключение накопителя
+    //   с тысячами уже лежащих на нём файлов дало бы тысячи записей
+    //   "создан".
+    // - Между двумя опросами изменения не отслеживаются: файл, созданный
+    //   и удалённый внутри одного интервала, не попадёт в журнал.
+    // - Обход ограничен по времени и числу файлов. Если лимит превышен
+    //   (медленная флешка с огромным числом файлов), снимок НЕ берётся
+    //   целиком: иначе недосканированные файлы выглядели бы удалёнными.
+    //   Такой цикл пропускается, факт попадает в --diag.
+    // =====================================================================
+    public static class UsbJournalMonitor
+    {
+        private const string CycleMutexName = @"Global\UsbBlockJournal_Cycle_v1";
+        private const string CycleMutexFallback = @"Local\UsbBlockJournal_Cycle_v1";
+
+        // Компенсация пропусков: если предыдущий машинный цикл был
+        // ДАВНО (кто-то перезапустился, служба стартовала/остановилась),
+        // все накопители и тома получают новое базовое состояние молча -
+        // иначе один перезапуск превратился бы в тысячи записей
+        // "создан"/"удалён" о файлах, которых никто не трогал.
+        private static readonly TimeSpan MaxGap = TimeSpan.FromSeconds(30);
+
+        // Ограничения обхода тома
+        private const int MaxScanFiles = 200000;
+        private const int MaxScanMs = 1500;
+
+        private static readonly object Sync = new object();
+
+        // Снимки файлов по томам (только в памяти: пишет один процесс).
+        internal sealed class Snap
+        {
+            public Dictionary<string, FileStamp> Files =
+                new Dictionary<string, FileStamp>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        internal struct FileStamp
+        {
+            public long Size;
+            public long WrittenTicks;
+        }
+
+        // Что сейчас подключено: ключ -> описание (для журнала отключения).
+        private static Dictionary<string, string> _present;
+        private static DateTime _lastCycleLocal = DateTime.MinValue;
+        private static bool _primed = false;
+        private static string _owner = string.Empty;
+
+        // Диагностика
+        public static int LastFileCount;
+        public static int LastTruncatedVolumes;
+        public static string LastError;
+        public static bool IsOwner
+        {
+            get { return !string.IsNullOrEmpty(_owner); }
+        }
+        public static string OwnerName
+        {
+            get { return _owner ?? string.Empty; }
+        }
+
+        private const string PresenceKey = @"SOFTWARE\USB_Block\JournalPresence";
+        private const string CycleKey = @"SOFTWARE\USB_Block\JournalPresence";
+        private const string LastCycleValue = "LastCycleTicks";
+
+        // Один цикл наблюдения. Вызывается треем и службой; работу делает
+        // только один из них (мьютекс), второй выходит сразу.
+        public static void RunOnce(bool byService)
+        {
+            lock (Sync)
+            {
+                Mutex mtx = Acquire();
+                if (mtx == null)
+                {
+                    _owner = string.Empty;
+                    return;
+                }
+                try
+                {
+                    bool held = false;
+                    try
+                    {
+                        try { held = mtx.WaitOne(1500); }
+                        catch (AbandonedMutexException) { held = true; }
+                    }
+                    catch
+                    {
+                        return;
+                    }
+                    if (!held) return;
+                    try
+                    {
+                        Cycle(byService);
+                    }
+                    finally
+                    {
+                        try { mtx.ReleaseMutex(); } catch { }
+                    }
+                }
+                finally
+                {
+                    try { mtx.Dispose(); } catch { }
+                }
+            }
+        }
+
+        private static Mutex Acquire()
+        {
+            // Служба живёт в сессии 0, трей - в сессии пользователя, поэтому
+            // Local\ даёт разные мьютексы и циклы пошли бы параллельно.
+            // Нужен Global\; создавать его может SYSTEM и администратор
+            // (оба журналируют), при отказе - запасной вариант Local\.
+            try
+            {
+                return new Mutex(false, CycleMutexName);
+            }
+            catch
+            {
+                try
+                {
+                    return new Mutex(false, CycleMutexFallback);
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+        }
+
+        private static void Cycle(bool byService)
+        {
+            _owner = byService ? "служба" : "трей (администратор)";
+
+            DateTime nowLocal = DateTime.Now;
+            bool gap = NeedsRebaseline(nowLocal);
+
+            try
+            {
+                bool blocked = PolicyManager.IsBlocked();
+                List<DeviceEntry> wl = UsbMonitor.GetWhitelist();
+                List<StorageDevice> disks = UsbQuery.GetUsbStorages();
+
+                // Списки томов и меток нужны и для устройств, и для файлов.
+                // Брать их из WMI на каждый накопитель и каждый том нельзя:
+                // запрос дорогой, и на большом числе накопителей цикл
+                // выродился бы в десятки одинаковых запросов. На цикл -
+                // один раз.
+                _cycVolumes = UsbQuery.GetUsbVolumes();
+                BuildCycleCaches(_cycVolumes);
+
+                JournalDevices(disks, wl, blocked, gap, nowLocal);
+                JournalFiles(wl, gap);
+            }
+            catch (Exception ex)
+            {
+                LastError = ex.Message;
+            }
+            finally
+            {
+if (_present == null) _present = LoadPresence();
+            // Предыдущее состояние для сравнения: сразу заполняем его
+            // тем, что лежит в реестре, иначе первый же цикл после запуска
+            // переписал бы реестр впустую.
+            if (_prev == null)
+                _prev = new Dictionary<string, string>(_present,
+                    StringComparer.OrdinalIgnoreCase);
+                SaveLastCycle(nowLocal);
+                _lastCycleLocal = nowLocal;
+                _primed = true;
+                _cycVolumes = null;
+                _cycLetters = null;
+                _cycLabels = null;
+            }
+        }
+
+        // Данные текущего цикла: тома, соответствие "диск -> буква" и
+        // метки томов. Заполняются один раз на цикл, используются и при
+        // разборе устройств, и при опросе файлов.
+        private static List<UsbVolume> _cycVolumes;
+        private static Dictionary<string, string> _cycLetters;
+        private static Dictionary<string, string> _cycLabels;
+
+        private static void BuildCycleCaches(List<UsbVolume> volumes)
+        {
+            _cycLetters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            _cycLabels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (volumes != null)
+            {
+                foreach (UsbVolume v in volumes)
+                {
+                    if (v == null) continue;
+                    if (!string.IsNullOrEmpty(v.DiskId) && !string.IsNullOrEmpty(v.DriveLetter) &&
+                        !_cycLetters.ContainsKey(v.DiskId))
+                    {
+                        _cycLetters[v.DiskId] = v.DriveLetter;
+                    }
+                }
+            }
+            try
+            {
+                Dictionary<string, string> labels = UsbQuery.GetVolumeLabels();
+                if (labels != null)
+                {
+                    foreach (KeyValuePair<string, string> kv in labels)
+                    {
+                        string key = NormalizeLetter(kv.Key);
+                        if (!string.IsNullOrEmpty(key)) _cycLabels[key] = kv.Value;
+                    }
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private static string NormalizeLetter(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return null;
+            return s.Trim().TrimEnd(':', '\\');
+        }
+
+        // Был ли перерыв длиннее MaxGap (перезапуск процесса/службы).
+        // Ответ хранится в HKLM, а не в памяти процесса: перерыв виден
+        // и тогда, когда журнал ведёт ДРУГОЙ процесс (служба вместо трея).
+        private static bool NeedsRebaseline(DateTime nowLocal)
+        {
+            if (!_primed) return true;
+            long ticks = 0;
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(CycleKey, false))
+                {
+                    if (k == null) return true;
+                    object v = k.GetValue(LastCycleValue);
+                    if (v == null) return true;
+                    ticks = Convert.ToInt64(v, CultureInfo.InvariantCulture);
+                }
+            }
+            catch
+            {
+                return true;
+            }
+            if (ticks <= 0) return true;
+            TimeSpan since = TimeSpan.FromTicks(nowLocal.Ticks - ticks);
+            return since < TimeSpan.Zero || since > MaxGap;
+        }
+
+        private static void SaveLastCycle(DateTime nowLocal)
+        {
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.CreateSubKey(CycleKey))
+                    k.SetValue(LastCycleValue, nowLocal.Ticks, RegistryValueKind.QWord);
+            }
+            catch
+            {
+            }
+        }
+
+        // ---- Устройства: подключение / отключение ----
+
+        private static void JournalDevices(List<StorageDevice> disks,
+            List<DeviceEntry> wl, bool blocked, bool silent, DateTime nowLocal)
+        {
+            if (_present == null) _present = LoadPresence();
+
+            Dictionary<string, string> now =
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (StorageDevice d in disks)
+            {
+                string key = DeviceKey(d);
+                if (key == null) continue;
+                string detail = DescribeDevice(d, wl, blocked);
+                if (!now.ContainsKey(key)) now[key] = detail;
+            }
+
+            // Появились. Причина пишется явно: обычное подключение отличается от
+            // находки при первом запуске журнала и от находки после перерыва
+            // в наблюдении (перезапуск программы или службы) - иначе
+            // нельзя понять, было ли устройство подключено сейчас или его
+            // просто не было видно, пока журнал не работал.
+            string reason = silent
+                ? (_primed ? "обнаружено после перерыва в наблюдении"
+                           : "обнаружено при запуске журнала")
+                : "подключение";
+            foreach (KeyValuePair<string, string> kv in now)
+            {
+                if (_present.ContainsKey(kv.Key)) continue;
+                UsbJournal.Write(silent ? UsbJournal.KindDeviceFound
+                    : UsbJournal.KindDeviceAdded,
+                    kv.Value + " | Причина=" + reason);
+            }
+
+            // Исчезли.
+            foreach (KeyValuePair<string, string> kv in _present)
+            {
+                if (now.ContainsKey(kv.Key)) continue;
+                UsbJournal.Write(UsbJournal.KindDeviceRemoved,
+                    kv.Value + " | Причина=отключение");
+            }
+
+            _present = now;
+            // Реестр переписываем только когда набор накопителей (или их
+            // описание) действительно изменился: цикл идёт каждые секунды,
+            // а запись в реестр на ровном месте - это лишняя работа и
+            // ненужные изменения в системе.
+            if (!SamePresence(_prev, now)) SavePresence(now);
+            _prev = now;
+        }
+
+        private static Dictionary<string, string> _prev;
+
+        private static bool SamePresence(
+            Dictionary<string, string> a, Dictionary<string, string> b)
+        {
+            if (a == null || b == null) return false;
+            if (a.Count != b.Count) return false;
+            foreach (KeyValuePair<string, string> kv in a)
+            {
+                string other;
+                if (!b.TryGetValue(kv.Key, out other)) return false;
+                if (!string.Equals(kv.Value, other, StringComparison.Ordinal)) return false;
+            }
+            return true;
+        }
+
+        private static string DescribeDevice(StorageDevice d, List<DeviceEntry> wl, bool blocked)
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.Append("SN=").Append(string.IsNullOrEmpty(d.Serial) ? "-" : d.Serial);
+            sb.Append(" | VID:PID=").Append(string.IsNullOrEmpty(d.UsbId) ? "-" : d.UsbId);
+            sb.Append(" | Модель=").Append(string.IsNullOrEmpty(d.Model) ? "-" : d.Model);
+            sb.Append(" | Метка=").Append(string.IsNullOrEmpty(d.Label) ? "-" : d.Label);
+            sb.Append(" | Блокировка=").Append(blocked ? "включена" : "выключена");
+            bool allowed = IsAllowed(d, wl);
+            string letter = LetterOf(d);
+            sb.Append(" | Решение=").Append(allowed ? "разрешён" : "заблокирован");
+            sb.Append(" | Буква=").Append(string.IsNullOrEmpty(letter) ? "-" : letter + ":");
+            return sb.ToString();
+        }
+
+        private static bool IsAllowed(StorageDevice d, List<DeviceEntry> wl)
+        {
+            if (wl == null || d == null) return false;
+            foreach (DeviceEntry e in wl)
+            {
+                if (!string.IsNullOrEmpty(e.UsbId) &&
+                    !string.Equals(e.UsbId, d.UsbId ?? "", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                if (!string.IsNullOrEmpty(e.Serial) &&
+                    !string.IsNullOrEmpty(d.Serial) &&
+                    !string.Equals(e.Serial, d.Serial, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                return true;
+            }
+            return false;
+        }
+
+        // Буква диска, если диск смонтирован (по совпадению PHYSICALDRIVE).
+        // Внутри цикла берётся из кэша: сопоставление дисков и томов уже
+        // сделано один раз при сборе данных цикла.
+        private static string LetterOf(StorageDevice d)
+        {
+            string diskId = d == null ? null : d.DiskDeviceId;
+            if (string.IsNullOrEmpty(diskId)) return null;
+            if (_cycLetters != null)
+            {
+                string cached;
+                return _cycLetters.TryGetValue(diskId, out cached) ? cached : null;
+            }
+            // Вне цикла (диагностика, вызовы до/после опроса).
+            try
+            {
+                foreach (UsbVolume v in UsbQuery.GetUsbVolumes())
+                    if (string.Equals(v.DiskId, diskId, StringComparison.OrdinalIgnoreCase))
+                        return v.DriveLetter;
+            }
+            catch
+            {
+            }
+            return null;
+        }
+
+        private static string DeviceKey(StorageDevice d)
+        {
+            if (d == null) return null;
+            if (!string.IsNullOrEmpty(d.Serial)) return "SN:" + d.Serial;
+            if (!string.IsNullOrEmpty(d.UsbId)) return "USB:" + d.UsbId;
+            if (!string.IsNullOrEmpty(d.DiskDeviceId)) return "DISK:" + d.DiskDeviceId;
+            return null;
+        }
+
+        // Состояние присутствия хранится в реестре (машино-широко): при
+        // перезапуске программы и при смене владельца журнала (трей <-> служба)
+        // состояние не теряется, поэтому повторно на те же накопители записи
+        // "подключение" не пишутся. Формат элемента MultiString:
+        // ключ TAB описание.
+        private static Dictionary<string, string> LoadPresence()
+        {
+            Dictionary<string, string> map =
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(PresenceKey, false))
+                {
+                    if (k == null) return map;
+                    string[] arr = k.GetValue("Keys") as string[];
+                    if (arr == null) return map;
+                    foreach (string s in arr)
+                    {
+                        if (string.IsNullOrEmpty(s)) continue;
+                        int tab = s.IndexOf('\t');
+                        if (tab <= 0) continue;
+                        map[s.Substring(0, tab)] = s.Substring(tab + 1);
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return map;
+        }
+
+        private static void SavePresence(Dictionary<string, string> map)
+        {
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.CreateSubKey(PresenceKey))
+                {
+                    if (map == null || map.Count == 0)
+                    {
+                        k.DeleteValue("Keys", false);
+                        return;
+                    }
+                    string[] arr = new string[map.Count];
+                    int i = 0;
+                    foreach (KeyValuePair<string, string> kv in map)
+                        arr[i++] = kv.Key + "\t" + kv.Value;
+                    k.SetValue("Keys", arr, RegistryValueKind.MultiString);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        // ---- Файлы на разрешённых томах: опрос и сравнение ----
+
+        private static void JournalFiles(List<DeviceEntry> wl, bool silent)
+        {
+            List<UsbVolume> volumes = _cycVolumes ?? UsbQuery.GetUsbVolumes();
+            LastTruncatedVolumes = 0;
+            int scanned = 0;
+
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (UsbVolume v in volumes)
+            {
+                string key = VolumeKey(v);
+                if (key == null) continue;
+                seen.Add(key);
+
+                if (!UsbMonitor.IsVolumeAllowed(v, wl))
+                {
+                    // Пособочный диск постороннего накопителя: копировать
+                    // на него нельзя (буква снята), следить не за чем.
+                    if (_snaps != null) _snaps.Remove(key);
+                    continue;
+                }
+                scanned += WatchVolume(v, key, silent);
+            }
+
+            // Тома, которых больше нет (отключён, снята буква, буква сменилась).
+            // Снимок молча забываем: иначе удаление накопителя дало бы
+            // тысячи записей "удалён".
+            if (_snaps != null)
+            {
+                List<string> gone = new List<string>();
+                foreach (string k in _snaps.Keys)
+                    if (!seen.Contains(k)) gone.Add(k);
+                foreach (string k in gone) _snaps.Remove(k);
+            }
+            LastFileCount = scanned;
+        }
+
+        private static Dictionary<string, Snap> _snaps;
+
+        // Идентификатор тома для снимка. Одного серийного номера мало: у
+        // накопителя с несколькими разделами он общий, и второй раздел
+        // затёр бы снимок первого - а это десятки тысяч ложных "удалён".
+        // Поэтому в ключ входит и номер физического диска.
+        internal static string VolumeKey(UsbVolume v)
+        {
+            if (v == null) return null;
+            bool hasSerial = !string.IsNullOrEmpty(v.Serial);
+            bool hasDisk = !string.IsNullOrEmpty(v.DiskId);
+            if (hasSerial && hasDisk) return "V:" + v.Serial + "#" + v.DiskId;
+            if (hasSerial) return "V:" + v.Serial;
+            if (hasDisk) return "D:" + v.DiskId;
+            if (!string.IsNullOrEmpty(v.DriveLetter)) return "L:" + v.DriveLetter;
+            return null;
+        }
+
+        // Опрос одного тома. Возвращает число просмотренных файлов.
+        private static int WatchVolume(UsbVolume v, string key, bool silent)
+        {
+            string root = v.DriveLetter + @":\";
+            Dictionary<string, FileStamp> current;
+            bool truncated;
+            int count = ScanVolume(root, out current, out truncated);
+
+            if (truncated)
+            {
+                // Обход не успел - снимок целиком неверен. Берём предыдущий
+                // (или, если его нет, оставляем том "неизвестным" до
+                // следующего успешного обхода) и в журнал НЕ пишем.
+                LastTruncatedVolumes++;
+                if (_snaps == null || !_snaps.ContainsKey(key)) return count;
+                return count;
+            }
+
+            if (_snaps == null) _snaps = new Dictionary<string, Snap>(StringComparer.OrdinalIgnoreCase);
+
+            Snap prev;
+            bool first = !_snaps.TryGetValue(key, out prev);
+            if (first)
+            {
+                // Первое появление тома - базовое состояние, молча.
+                prev = new Snap();
+                prev.Files = current;
+                _snaps[key] = prev;
+                return count;
+            }
+
+            List<string> events = Diff(prev.Files, current);
+            prev.Files = current;
+
+            if (silent)
+            {
+                // Восстановление после перерыва: изменения за время, когда
+                // никого не было, честно записать нельзя. Записываем одну
+                // служебную строку вместо потока сравнений.
+                if (events.Count > 0)
+                {
+                    UsbJournal.Write(UsbJournal.KindNote,
+                        "Наблюдение за томом " + v.DriveLetter + ": снимок обновлён после " +
+                        "перерыва, изменений за время простоя не записано");
+                }
+                return count;
+            }
+
+            string device = " | SN=" + (string.IsNullOrEmpty(v.Serial) ? "-" : v.Serial) +
+                " | Модель=" + (string.IsNullOrEmpty(v.Model) ? "-" : v.Model) +
+                " | Метка=" + VolumeLabelOf(v.DriveLetter);
+            foreach (string ev in events)
+                UsbJournal.WriteRaw(FormatEvent(ev) + device);
+            return count;
+        }
+
+        private static string VolumeLabelOf(string letter)
+        {
+            string key = NormalizeLetter(letter);
+            if (string.IsNullOrEmpty(key)) return "-";
+            if (_cycLabels != null)
+            {
+                string cached;
+                if (_cycLabels.TryGetValue(key, out cached) && !string.IsNullOrEmpty(cached))
+                    return cached;
+                return "-";
+            }
+            try
+            {
+                Dictionary<string, string> labels = UsbQuery.GetVolumeLabels();
+                string l;
+                if (labels.TryGetValue(key, out l) && !string.IsNullOrEmpty(l)) return l;
+            }
+            catch
+            {
+            }
+            return "-";
+        }
+
+        // Разбор "вид\tпуть\tразмер" обратно в готовую запись журнала.
+        // Путь уже полный (начинается с буквы тома), поэтому том подставлять
+        // не нужно.
+        private static string FormatEvent(string ev)
+        {
+            string[] p = ev.Split('\t');
+            StringBuilder sb = new StringBuilder();
+            sb.Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
+            sb.Append('\t').Append(p[0]).Append('\t');
+            sb.Append(Term(p.Length > 1 ? p[1] : string.Empty));
+            if (p.Length > 2 && !string.IsNullOrEmpty(p[2]))
+                sb.Append(" | ").Append(p[2]);
+            return sb.ToString();
+        }
+
+        private static string Term(string s)
+        {
+            return string.IsNullOrEmpty(s) ? "-" : s;
+        }
+
+        // Сравнение снимков. Возвращает список "вид\tпуть\tразмер".
+        // Переименование отличается от пары удалить+создать: если в одной
+        // папке удалён ровно один файл и создан ровно один с тем же
+        // размером и тем же временем изменения - это перенос/переименование.
+        internal static List<string> Diff(
+            Dictionary<string, FileStamp> oldFiles,
+            Dictionary<string, FileStamp> newFiles)
+        {
+            List<string> added = new List<string>();
+            List<string> changed = new List<string>();
+            List<string> removed = new List<string>();
+
+            foreach (KeyValuePair<string, FileStamp> kv in newFiles)
+            {
+                FileStamp was;
+                if (!oldFiles.TryGetValue(kv.Key, out was))
+                {
+                    added.Add(kv.Key);
+                }
+                else if (was.Size != kv.Value.Size || was.WrittenTicks != kv.Value.WrittenTicks)
+                {
+                    changed.Add(kv.Key);
+                }
+            }
+foreach (string path in oldFiles.Keys)
+                if (!newFiles.ContainsKey(path))
+                    removed.Add(path);
+
+            // Переименование отличается от пары "удалён+создан": если в
+            // одной папке удалён ровно один файл и создан ровно один с тем
+            // же размером и тем же временем изменения - это перенос или
+            // переименование. Списки раскладываются по папкам один раз,
+            // иначе перебор пар был бы квадратичным.
+            Dictionary<string, List<string>> removedByDir = GroupByDir(removed);
+            Dictionary<string, List<string>> addedByDir = GroupByDir(added);
+
+            List<string> renames = new List<string>();
+            HashSet<string> renamedFrom = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> renamedTo = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (KeyValuePair<string, List<string>> dir in addedByDir)
+            {
+                if (dir.Value.Count != 1) continue;
+                List<string> removedHere;
+                if (!removedByDir.TryGetValue(dir.Key, out removedHere)) continue;
+                if (removedHere.Count != 1) continue;
+                string from = removedHere[0];
+                string to = dir.Value[0];
+                FileStamp os = oldFiles[from];
+                FileStamp ns = newFiles[to];
+                if (os.Size != ns.Size || os.WrittenTicks != ns.WrittenTicks) continue;
+                renamedFrom.Add(from);
+                renamedTo.Add(to);
+                renames.Add(UsbJournal.KindFileRenamed + "\t" + to + "\t" + from);
+            }
+
+            List<string> result = new List<string>(renames);
+            foreach (string path in removed)
+                if (!renamedFrom.Contains(path))
+                    result.Add(UsbJournal.KindFileRemoved + "\t" + path + "\t" +
+                        SizeOf(oldFiles[path]));
+            foreach (string path in changed)
+                result.Add(UsbJournal.KindFileChanged + "\t" + path + "\t" +
+                    SizeOf(newFiles[path]));
+            foreach (string path in added)
+                if (!renamedTo.Contains(path))
+                    result.Add(UsbJournal.KindFileAdded + "\t" + path + "\t" +
+                        SizeOf(newFiles[path]));
+            return result;
+        }
+
+        private static Dictionary<string, List<string>> GroupByDir(List<string> paths)
+        {
+            Dictionary<string, List<string>> map =
+                new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            foreach (string p in paths)
+            {
+                string dir = ParentDir(p);
+                List<string> list;
+                if (!map.TryGetValue(dir, out list))
+                {
+                    list = new List<string>();
+                    map[dir] = list;
+                }
+                list.Add(p);
+            }
+            return map;
+        }
+
+        private static string SizeOf(FileStamp s)
+        {
+            return "Размер=" + s.Size.ToString(CultureInfo.InvariantCulture) + " байт";
+        }
+
+        private static string ParentDir(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return string.Empty;
+            int i = path.LastIndexOfAny(new char[] { '\\', '/' });
+            return i < 0 ? string.Empty : path.Substring(0, i);
+        }
+
+        // Обход дерева каталогов тома. Возвращает снимок; truncated=true,
+        // если упёрлись в лимит по времени или числу файлов - такой снимок
+        // использовать нельзя (недосканированные файлы сочлись бы удалёнными).
+        internal static int ScanVolume(string root, out Dictionary<string, FileStamp> files,
+            out bool truncated)
+        {
+            files = new Dictionary<string, FileStamp>(StringComparer.OrdinalIgnoreCase);
+            truncated = false;
+            if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return 0;
+
+            System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+            Stack<string> dirs = new Stack<string>();
+            dirs.Push(root);
+            int count = 0;
+
+            while (dirs.Count > 0)
+            {
+                string dir = dirs.Pop();
+                string[] entries;
+                try
+                {
+                    entries = Directory.GetFileSystemEntries(dir);
+                }
+                catch
+                {
+                    continue;
+                }
+                foreach (string entry in entries)
+                {
+                    string name = SafeName(entry);
+                    if (IsSystemName(name)) continue;
+                    FileAttributes attr;
+                    try
+                    {
+                        attr = File.GetAttributes(entry);
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+                    if ((attr & FileAttributes.ReparsePoint) != 0)
+                    {
+                        // Точки повторного входа ( junctions, symlinks) не
+                        // обходим - иначе можно уйти в цикл.
+                        continue;
+                    }
+                    if ((attr & FileAttributes.Directory) != 0)
+                    {
+                        dirs.Push(entry);
+                        continue;
+                    }
+                    try
+                    {
+                        FileInfo fi = new FileInfo(entry);
+                        if (!fi.Exists) continue;
+                        files[entry] = new FileStamp
+                        {
+                            Size = fi.Length,
+                            WrittenTicks = fi.LastWriteTimeUtc.Ticks
+                        };
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+                    count++;
+                    if (count >= MaxScanFiles ||
+                        (count % 256 == 0 && sw.ElapsedMilliseconds > MaxScanMs))
+                    {
+                        truncated = true;
+                        return count;
+                    }
+                }
+            }
+            return count;
+        }
+
+        private static string SafeName(string path)
+        {
+            try
+            {
+                return Path.GetFileName(path) ?? string.Empty;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        // Служебные папки: их содержимое копированием с ПК не считается.
+        private static bool IsSystemName(string name)
+        {
+            return string.Equals(name, "$RECYCLE.BIN", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(name, "System Volume Information", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(name, "RECYCLER", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(name, "System Volume Information (G)", StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    // =====================================================================
+    // Скрытое окно для ловли WM_DEVICECHANGE и WM_HOTKEY
     // =====================================================================
     public sealed class HiddenWindow : NativeWindow
     {
         private const int WM_DEVICECHANGE = 0x0219;
+        private const int WM_HOTKEY = 0x0312;
         private const int DBT_DEVICEARRIVAL = 0x8000;
         private const int DBT_DEVICEREMOVECOMPLETE = 0x8004;
         private readonly Action _onChange;
+        private readonly Action _onHotkey;
 
         public HiddenWindow(Action onChange)
+            : this(onChange, null)
+        {
+        }
+
+        public HiddenWindow(Action onChange, Action onHotkey)
         {
             _onChange = onChange;
+            _onHotkey = onHotkey;
         }
 
         public void EnsureCreated()
@@ -2422,7 +3704,390 @@ namespace UsbBlockTray
                     }
                 }
             }
+            else if (m.Msg == WM_HOTKEY && m.WParam.ToInt32() == HotkeyStore.HotkeyId)
+            {
+                Action hk = _onHotkey;
+                if (hk != null)
+                {
+                    try { hk(); }
+                    catch { }
+                }
+            }
             base.WndProc(ref m);
+        }
+    }
+
+    // =====================================================================
+    // ГОРЯЧАЯ КЛАВИША открытия журнала.
+    // Комбинация задаётся при установке службы мониторинга (пункт 7) и
+    // хранится в HKLM\SOFTWARE\USB_Block (обычное значение REG_SZ, читать
+    // может любой - в самой комбинации ничего секретного нет; записывает
+    // её только администратор при установке службы).
+    // Хранится именно в HKLM, а не в зашифрованном файле, потому что
+    // горячую клавишу должен уметь зарегистрировать и трей обычного
+    // пользователя: нажатие поднимет права и откроет журнал отдельным
+    // процессом --journal.
+    //
+    // Кто регистрирует: трей, а если он выгружен ("Выход") - уведомитель.
+    // Мьютекс тут не нужен: RegisterHotKey для одной комбинации в системе
+    // один, и второй процесс получит отказ - так они и делят клавишу
+    // без всякой координации.
+    // =====================================================================
+    public static class HotkeyStore
+    {
+        private const string ValueKey = @"SOFTWARE\USB_Block";
+        private const string ValueName = "Hotkey";
+
+        // Идентификатор горячей клавиши в WM_HOTKEY.
+        public const int HotkeyId = 0xB10C;
+
+        public const uint ModAlt = 0x0001;
+        public const uint ModControl = 0x0002;
+        public const uint ModShift = 0x0004;
+        public const uint ModWin = 0x0008;
+
+        // Комбинация по умолчанию, если при установке службы ничего не задано.
+        public const string DefaultText = "Ctrl+Alt+U";
+
+        public static string LastError;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+        public static bool Exists()
+        {
+            return !string.IsNullOrEmpty(GetText());
+        }
+
+        public static string GetText()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(ValueKey, false))
+                {
+                    if (k == null) return null;
+                    return k.GetValue(ValueName) as string;
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        public static bool SetText(string text)
+        {
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.CreateSubKey(ValueKey))
+                    k.SetValue(ValueName, text ?? string.Empty, RegistryValueKind.String);
+                LastError = null;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LastError = "запись: " + ex.Message;
+                return false;
+            }
+        }
+
+        // Комбинация снимается вместе со службой: она задавалась для её
+        // работы, без службы открывать нечего.
+        public static void Clear()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(ValueKey, true))
+                {
+                    if (k != null) k.DeleteValue(ValueName, false);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        // "Ctrl+Alt+U" -> модификаторы и виртуальная клавиша.
+        // Возвращает false, если строка разобрать нельзя.
+        public static bool TryParse(string text, out uint modifiers, out uint vk)
+        {
+            modifiers = 0;
+            vk = 0;
+            if (string.IsNullOrEmpty(text)) return false;
+            string[] parts = text.Split('+');
+            if (parts.Length < 2) return false;
+            for (int i = 0; i < parts.Length - 1; i++)
+            {
+                string m = parts[i].Trim();
+                if (string.Equals(m, "Ctrl", StringComparison.OrdinalIgnoreCase))
+                    modifiers |= ModControl;
+                else if (string.Equals(m, "Alt", StringComparison.OrdinalIgnoreCase))
+                    modifiers |= ModAlt;
+                else if (string.Equals(m, "Shift", StringComparison.OrdinalIgnoreCase))
+                    modifiers |= ModShift;
+                else if (string.Equals(m, "Win", StringComparison.OrdinalIgnoreCase))
+                    modifiers |= ModWin;
+                else
+                    return false;
+            }
+            if (modifiers == 0) return false;   // одна клавиша без Ctrl/Alt/Shift
+
+            string main = parts[parts.Length - 1].Trim();
+            if (main.Length == 0) return false;
+            Keys k;
+            try
+            {
+                k = (Keys)Enum.Parse(typeof(Keys), main, true);
+            }
+            catch
+            {
+                return false;
+            }
+            if (!Enum.IsDefined(typeof(Keys), k)) return false;
+            vk = unchecked((uint)k);
+            return IsMainKey(k, vk);
+        }
+
+        // Пригодна ли клавиша для основной (не модификатора).
+        public static bool IsMainKey(Keys k, uint vk)
+        {
+            // Основная клавиша - это виртуальная клавиша Windows, 0x01..0xFF.
+            // Больше ничего быть не может: в перечислении Keys есть служебные
+            // значения-биты модификаторов (Shift = 0x10000, Control = 0x20000,
+            // Alt = 0x40000). Для RegisterHotKey они не клавиши вовсе, и
+            // разбирать их как таковые нельзя - иначе в строке вида
+            // "Ctrl+Shift" слово Shift посчиталось бы клавишей.
+            if (vk == 0 || vk > 0xFF) return false;
+            if (k == Keys.ControlKey || k == Keys.Menu || k == Keys.ShiftKey ||
+                k == Keys.LControlKey || k == Keys.RControlKey ||
+                k == Keys.LMenu || k == Keys.RMenu ||
+                k == Keys.LShiftKey || k == Keys.RShiftKey ||
+                k == Keys.LWin || k == Keys.RWin)
+            {
+                return false;
+            }
+            return true;
+        }
+
+        // Клавиша-модификатор (её нельзя назвать основной).
+        public static bool IsModifierKey(Keys k)
+        {
+            return IsMainKey(k, unchecked((uint)k)) == false &&
+                (k == Keys.ControlKey || k == Keys.Menu || k == Keys.ShiftKey ||
+                 k == Keys.LWin || k == Keys.RWin || k == Keys.LControlKey ||
+                 k == Keys.RControlKey || k == Keys.LMenu || k == Keys.RMenu ||
+                 k == Keys.LShiftKey || k == Keys.RShiftKey);
+        }
+
+        // Обратное преобразование - для показа в окне и в --diag.
+        public static string Format(uint modifiers, uint vk)
+        {
+            StringBuilder sb = new StringBuilder();
+            if ((modifiers & ModControl) != 0) sb.Append("Ctrl+");
+            if ((modifiers & ModAlt) != 0) sb.Append("Alt+");
+            if ((modifiers & ModShift) != 0) sb.Append("Shift+");
+            if ((modifiers & ModWin) != 0) sb.Append("Win+");
+            sb.Append(((Keys)unchecked((int)vk)).ToString());
+            return sb.ToString();
+        }
+
+        // Зарегистрировать на окне. false - комбинация не задана, занята
+        // другой программой или RegisterHotKey отказал.
+        public static bool Register(IntPtr hwnd)
+        {
+            LastError = null;
+            string text = GetText();
+            if (string.IsNullOrEmpty(text)) return false;
+            uint mods, vk;
+            if (!TryParse(text, out mods, out vk))
+            {
+                LastError = "неверно сохранённая комбинация: " + text;
+                return false;
+            }
+            try
+            {
+                if (RegisterHotKey(hwnd, HotkeyId, mods, vk)) return true;
+                int err = Marshal.GetLastWin32Error();
+                LastError = "комбинация " + text + " занята другой программой (код " +
+                    err.ToString(CultureInfo.InvariantCulture) + ")";
+            }
+            catch (Exception ex)
+            {
+                LastError = "RegisterHotKey: " + ex.Message;
+            }
+            return false;
+        }
+
+        public static void Unregister(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return;
+            try { UnregisterHotKey(hwnd, HotkeyId); }
+            catch { }
+        }
+    }
+
+    // =====================================================================
+    // Окно задания комбинации: «нажмите клавиши».
+    // Работает как при первом запуске, так и для смены комбинации.
+    // Пока включён режим захвата, обычный ввод с клавиатуры не доходит до
+    // элементов окна (в том числе пробел и Enter не нажимают кнопки).
+    // Требуется хотя бы один модификатор (Ctrl/Alt/Shift/Win) - иначе
+    // программа перехватывала бы обычный набор текста во всей системе.
+    // =====================================================================
+    public sealed class HotkeyCaptureForm : Form
+    {
+        private readonly TextBox _box;
+        private readonly Button _capture;
+        private readonly Label _hint;
+        private bool _capturing;
+        private string _value;
+
+        public string Hotkey
+        {
+            get { return _value; }
+        }
+
+        public HotkeyCaptureForm(string current)
+        {
+            _value = current;
+
+            this.Text = "Комбинация клавиш для журнала";
+            this.FormBorderStyle = FormBorderStyle.FixedDialog;
+            this.MaximizeBox = false;
+            this.MinimizeBox = false;
+            this.StartPosition = FormStartPosition.CenterParent;
+            this.ClientSize = new Size(470, 206);
+            this.AutoScaleDimensions = new SizeF(7F, 15F);
+            this.AutoScaleMode = AutoScaleMode.Font;
+            this.Font = SystemFonts.MessageBoxFont;
+
+            Label title = new Label();
+            title.Text = "Комбинация, которой открывается журнал подключений";
+            title.AutoSize = true;
+            title.Location = new Point(12, 12);
+            this.Controls.Add(title);
+
+            _box = new TextBox();
+            _box.Location = new Point(12, 36);
+            _box.Size = new Size(446, 23);
+            _box.ReadOnly = true;
+            _box.TextAlign = HorizontalAlignment.Center;
+            _box.TabStop = true;
+            this.Controls.Add(_box);
+
+            _capture = new Button();
+            _capture.Text = "Задать...";
+            _capture.Location = new Point(12, 70);
+            _capture.Size = new Size(140, 27);
+            _capture.Click += delegate { StartCapture(); };
+            this.Controls.Add(_capture);
+
+            _hint = new Label();
+            _hint.AutoSize = false;
+            _hint.Size = new Size(446, 46);
+            _hint.Location = new Point(12, 106);
+            this.Controls.Add(_hint);
+
+            Button ok = new Button();
+            ok.Text = "OK";
+            ok.DialogResult = DialogResult.OK;
+            ok.Location = new Point(292, 163);
+            ok.Size = new Size(78, 27);
+            this.Controls.Add(ok);
+            this.AcceptButton = ok;
+
+            Button cancel = new Button();
+            cancel.Text = "Отмена";
+            cancel.DialogResult = DialogResult.Cancel;
+            cancel.Location = new Point(380, 163);
+            cancel.Size = new Size(78, 27);
+            this.Controls.Add(cancel);
+            this.CancelButton = cancel;
+
+            ShowValue();
+        }
+
+        private void ShowValue()
+        {
+            if (string.IsNullOrEmpty(_value))
+            {
+                _box.Text = "не задана";
+                _hint.Text = "Нажмите «Задать...» и наберите сочетание, например Ctrl+Alt+U.";
+            }
+            else
+            {
+                _box.Text = _value;
+                _hint.Text = "Нажмите «Задать...», чтобы заменить сочетание.";
+            }
+        }
+
+        private void StartCapture()
+        {
+            _capturing = true;
+            _box.Text = "нажмите клавиши...";
+            _hint.Text = "Нужно основное поле и хотя бы один из Ctrl, Alt, Shift, Win. " +
+                "Esc - отмена захвата.";
+            _capture.Enabled = false;
+            _box.Focus();
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            // Пока идёт захват, клавиатура принадлежит только полю ввода:
+            // пробел не должен нажимать OK, а цифры не должны попадать в него.
+            if (_capturing && (keyData & Keys.KeyCode) != Keys.None)
+            {
+                Accept(msg, keyData);
+                return true;
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        private void Accept(Message msg, Keys keyData)
+        {
+            if (keyData == Keys.Escape)
+            {
+                _capturing = false;
+                _capture.Enabled = true;
+                ShowValue();
+                return;
+            }
+
+            Keys code = keyData & Keys.KeyCode;
+            uint mods = 0;
+            if ((keyData & Keys.Control) != 0) mods |= HotkeyStore.ModControl;
+            if ((keyData & Keys.Alt) != 0) mods |= HotkeyStore.ModAlt;
+            if ((keyData & Keys.Shift) != 0) mods |= HotkeyStore.ModShift;
+            if ((keyData & Keys.LWin) != 0 || (keyData & Keys.RWin) != 0)
+                mods |= HotkeyStore.ModWin;
+
+            bool bareModifier = HotkeyStore.IsModifierKey(code);
+            if (bareModifier)
+            {
+                _hint.Text = "Добавьте основную клавишу (например Ctrl+Alt+U).";
+                return;
+            }
+            if (mods == 0)
+            {
+                _hint.Text = "Нужен хотя бы один из Ctrl, Alt, Shift, Win - иначе " +
+                    "сочетание будет перехватывать обычный набор текста.";
+                return;
+            }
+            if (!Enum.IsDefined(typeof(Keys), code) ||
+                !HotkeyStore.IsMainKey(code, unchecked((uint)code)))
+            {
+                _hint.Text = "Эта клавиша не подходит как основная (Ctrl, Alt, " +
+                    "Shift и Win задаются как добавка). Выберите обычную клавишу.";
+                return;
+            }
+
+            _capturing = false;
+            _capture.Enabled = true;
+            _value = HotkeyStore.Format(mods, unchecked((uint)code));
+            ShowValue();
         }
     }
 
@@ -3049,6 +4714,218 @@ namespace UsbBlockTray
     }
 
     // =====================================================================
+    // Окно просмотра журнала. Открывается только администратором (журнал
+    // зашифрован и закрыт ACL, как whitelist.dat), и только по горячей
+    // клавише: отдельного пункта в меню трея нет намеренно - журнал не
+    // должен попадать под руку тому, кто сёл за машину.
+    // Две вкладки: подключения накопителей и файлы на разрешённых
+    // накопителях. Текст только для чтения, но его можно выделить и
+    // скопировать (Ctrl+A / Ctrl+C) - журнал пригодится для разбора.
+    // Записи выводятся свежими сверху, служебные строки - в своей вкладке
+    // не теряются, а помечены в общем виде.
+    // =====================================================================
+    public sealed class JournalViewForm : Form
+    {
+        // Ограничение выдачи: журнал живёт кольцом до 100000 записей,
+        // в окно столько не влезет. Показываем последние LimitPerTab.
+        private const int LimitPerTab = 20000;
+
+        private readonly TabControl _tabs;
+        private readonly TextBox _devices;
+        private readonly TextBox _files;
+        private readonly TextBox _notes;
+        private readonly Label _status;
+
+        public JournalViewForm()
+        {
+            this.Text = "Журнал USB-блокировки";
+            this.StartPosition = FormStartPosition.CenterScreen;
+            this.FormBorderStyle = FormBorderStyle.Sizable;
+            this.MinimizeBox = false;
+            this.ClientSize = new Size(920, 620);
+            this.Font = SystemFonts.MessageBoxFont;
+            this.AutoScaleDimensions = new SizeF(7F, 15F);
+            this.AutoScaleMode = AutoScaleMode.Font;
+
+            _tabs = new TabControl();
+            _tabs.SetBounds(12, 8, 896, 560);
+            this.Controls.Add(_tabs);
+
+            _devices = MakeBox();
+            _files = MakeBox();
+            _notes = MakeBox();
+            _tabs.TabPages.Add(MakePage("Подключения накопителей", _devices));
+            _tabs.TabPages.Add(MakePage("Файлы на накопителях", _files));
+            _tabs.TabPages.Add(MakePage("Служебные записи", _notes));
+
+            _status = new Label();
+            _status.SetBounds(12, 574, 620, 22);
+            this.Controls.Add(_status);
+
+            Button refresh = new Button();
+            refresh.Text = "Обновить";
+            refresh.SetBounds(660, 572, 108, 27);
+            refresh.Click += delegate { Fill(); };
+            this.Controls.Add(refresh);
+
+            Button copy = new Button();
+            copy.Text = "Копировать";
+            copy.SetBounds(776, 572, 108, 27);
+            copy.Click += delegate { CopyCurrent(); };
+            this.Controls.Add(copy);
+
+            this.AcceptButton = refresh;
+            this.CancelButton = null;
+            Fill();
+        }
+
+        private static TextBox MakeBox()
+        {
+            TextBox tb = new TextBox();
+            // Моноширинный шрифт - в журнале важны отступы и выравнивание
+            // колонок. Обычный системный шрифт для этого не годится.
+            tb.Font = new Font("Consolas", 8.5f);
+            tb.Multiline = true;
+            tb.ReadOnly = true;
+            tb.WordWrap = false;
+            tb.ScrollBars = ScrollBars.Both;
+            tb.BackColor = SystemColors.Window;
+            tb.ForeColor = SystemColors.WindowText;
+            tb.Dock = DockStyle.Fill;
+            return tb;
+        }
+
+        private static TabPage MakePage(string title, Control child)
+        {
+            TabPage page = new TabPage();
+            page.Text = title;
+            page.Padding = new Padding(6);
+            page.Controls.Add(child);
+            return page;
+        }
+
+        private void Fill()
+        {
+            try
+            {
+                List<string> lines = UsbJournal.ReadRecent(LimitPerTab * 3);
+                List<string> dev = new List<string>();
+                List<string> files = new List<string>();
+                List<string> notes = new List<string>();
+                int shownDev = 0, shownFiles = 0, shownNotes = 0;
+
+                foreach (string line in lines)
+                {
+                    string kind = KindOf(line);
+                    if (kind == UsbJournal.KindNote)
+                    {
+                        if (shownNotes++ < LimitPerTab) notes.Add(Format(line));
+                    }
+                    else if (IsFileKind(kind))
+                    {
+                        if (shownFiles++ < LimitPerTab) files.Add(Format(line));
+                    }
+                    else
+                    {
+                        if (shownDev++ < LimitPerTab) dev.Add(Format(line));
+                    }
+                }
+
+                SetText(_devices, dev);
+                SetText(_files, files);
+                SetText(_notes, notes);
+
+                long bytes = UsbJournal.TotalSizeBytes();
+                _status.Text = "Записей в файлах журнала: " +
+                    UsbJournal.TotalRecordCount().ToString(CultureInfo.InvariantCulture) +
+                    "   Размер: " + bytes.ToString(CultureInfo.InvariantCulture) + " байт" +
+                    "   Показано: устройств " + shownDev.ToString(CultureInfo.InvariantCulture) +
+                    " / файлов " + shownFiles.ToString(CultureInfo.InvariantCulture) +
+                    (shownNotes > 0 ? " / служебных " + shownNotes.ToString(CultureInfo.InvariantCulture) : string.Empty) +
+                    "   Записи старше порога показа не показаны.";
+            }
+            catch (Exception ex)
+            {
+                _status.Text = "Не удалось прочитать журнал: " + ex.Message;
+            }
+        }
+
+        private void CopyCurrent()
+        {
+            try
+            {
+                TextBox box = _tabs.SelectedIndex == 0 ? _devices
+                    : _tabs.SelectedIndex == 1 ? _files : _notes;
+                if (box.TextLength == 0) return;
+                box.SelectionStart = 0;
+                box.SelectionLength = box.TextLength;
+                box.Focus();
+                SendKeys.SendWait("^c");
+            }
+            catch
+            {
+            }
+        }
+
+        private static void SetText(TextBox box, List<string> lines)
+        {
+            box.SuspendLayout();
+            try
+            {
+                box.Lines = lines.ToArray();
+            }
+            finally
+            {
+                box.ResumeLayout();
+            }
+            box.SelectionStart = 0;
+            box.SelectionLength = 0;
+        }
+
+        private static string KindOf(string line)
+        {
+            int t1 = line.IndexOf('\t');
+            if (t1 < 0) return string.Empty;
+            int t2 = line.IndexOf('\t', t1 + 1);
+            if (t2 < 0) return string.Empty;
+            return line.Substring(t1 + 1, t2 - t1 - 1);
+        }
+
+        private static bool IsFileKind(string kind)
+        {
+            return kind == UsbJournal.KindFileAdded ||
+                   kind == UsbJournal.KindFileChanged ||
+                   kind == UsbJournal.KindFileRemoved ||
+                   kind == UsbJournal.KindFileRenamed;
+        }
+
+        // Читаемая строка: время, вид операции словами, подробности.
+        private static string Format(string line)
+        {
+            string[] p = line.Split('\t');
+            if (p.Length < 3) return line;
+            string when = p[0];
+            string word = KindText(p[1]);
+            string rest = p[2];
+            // Уравниваем колонку времени, чтобы взгляд шёл ровно.
+            return when.PadRight(19) + " " + word.PadRight(16) + " " + rest;
+        }
+
+        private static string KindText(string kind)
+        {
+            if (kind == UsbJournal.KindDeviceAdded) return "подключён";
+            if (kind == UsbJournal.KindDeviceRemoved) return "отключён";
+            if (kind == UsbJournal.KindDeviceFound) return "обнаружен";
+            if (kind == UsbJournal.KindFileAdded) return "скопирован";
+            if (kind == UsbJournal.KindFileChanged) return "изменён";
+            if (kind == UsbJournal.KindFileRemoved) return "удалён";
+            if (kind == UsbJournal.KindFileRenamed) return "перенесён";
+            if (kind == UsbJournal.KindNote) return "служебное";
+            return kind;
+        }
+    }
+
+    // =====================================================================
     // Очистка остатков автозапуска (раньше автозапуск создавал задачу
     // Планировщика schtasks /SC ONLOGON и запись HKLM Run; теперь функция
     // отключена, осталась только молчаливая чистка следов старых версий).
@@ -3340,8 +5217,15 @@ namespace UsbBlockTray
 
             BuildMenu();
 
-            _hwnd = new HiddenWindow(HandleDeviceChange);
+            _hwnd = new HiddenWindow(HandleDeviceChange, HandleHotkey);
             _hwnd.EnsureCreated();
+
+            // Горячая клавиша открытия журнала задаётся при установке службы.
+            // Регистрирует её тот процесс, который выиграл: пока жив трей -
+            // он, после "Выход" - уведомитель. Занятая клавиша (например
+            // другая программа) не повод отказываться от работы программы,
+            // поэтому отказ пишем в LastError для --diag и идём дальше.
+            HotkeyStore.Register(_hwnd.Handle);
 
             _timer = new System.Windows.Forms.Timer();
             _timer.Interval = 3000;
@@ -3349,6 +5233,39 @@ namespace UsbBlockTray
             _timer.Start();
 
             TickScan();
+        }
+
+        // Нажата горячая клавиша журнала. От администратора окно
+        // открывается здесь же, от обычного пользователя - права
+        // поднимаются и журнал открывает отдельный процесс --journal.
+        private void HandleHotkey()
+        {
+            try
+            {
+                if (Program.IsAdministrator())
+                {
+                    using (JournalViewForm form = new JournalViewForm())
+                    {
+                        form.ShowDialog();
+                    }
+                }
+                else if (!Program.StartJournalViewer(true))
+                {
+                    MessageBox.Show("Не удалось открыть журнал с правами администратора.",
+                        Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
+                }
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    MessageBox.Show("Не удалось открыть журнал: " + ex.Message,
+                        Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
+                }
+                catch
+                {
+                }
+            }
         }
 
         private void BuildMenu()
@@ -4083,6 +6000,14 @@ namespace UsbBlockTray
             // Пароль защиты спрашивается ДО установки службы: отмена в окне
             // пароля отменяет и установку службы.
             if (!AskSetPassword()) return;
+
+            // Комбинация клавиш открытия журнала - тоже до установки.
+            // Пока службы нет, журнал ведёт трей, но назначать клавишу
+            // имеет смысл именно здесь: журнал нужен для разбора того, что
+            // делала служба. Отмена в этом окне отменяет установку.
+            string hotkey = AskHotkey();
+            if (hotkey == null) return;
+
             try
             {
                 string err = ServiceManager.Install();
@@ -4096,6 +6021,19 @@ namespace UsbBlockTray
                 // Планировщика, запускающая трей при входе любого пользователя.
                 string tErr = TrayTask.Create();
                 RefreshServiceMenu();
+
+                // Комбинацию сохраняем ПОСЛЕ установки службы: она должна
+                // существовать ровно тогда, когда журнал ведёт служба, и
+                // сниматься вместе с ней (пункт 8).
+                bool hotkeyOk = HotkeyStore.SetText(hotkey);
+                if (hotkeyOk)
+                {
+                    // Регистрирует трей этого процесса; у остальных
+                    // пользователей подхватит уведомитель при следующем входе
+                    // (или сам уведомитель текущей сессии).
+                    if (_hwnd != null) HotkeyStore.Register(_hwnd.Handle);
+                }
+
                 if (tErr != null)
                 {
                     MessageBox.Show(
@@ -4108,7 +6046,12 @@ namespace UsbBlockTray
                     "Служба мониторинга установлена и запущена от имени SYSTEM.\n" +
                     "Значок в трее и уведомления появятся у всех пользователей\n" +
                     "после перезагрузки. Уведомления работают независимо от\n" +
-                    "выгрузки значка из трея.",
+                    "выгрузки значка из трея.\n" +
+                    (hotkeyOk
+                        ? "Журнал подключений и копирований открывается клавишами: " +
+                          hotkey + "."
+                        : "Внимание: комбинацию клавиш журнала сохранить не удалось" +
+                          (HotkeyStore.LastError != null ? " (" + HotkeyStore.LastError + ")" : "") + "."),
                     ToolTipIcon.Info);
             }
             catch (Exception ex)
@@ -4142,6 +6085,13 @@ namespace UsbBlockTray
                 // Убираем и значок в трее для всех пользователей
                 // (задача Планировщика).
                 TrayTask.Delete();
+
+                // Службы нет - журнал ведёт только трей, а он открывается
+                // из меню; отдельная клавиша больше не нужна и была бы
+                // просто мёртвой. Снимаем её и в этом процессе.
+                HotkeyStore.Clear();
+                if (_hwnd != null) HotkeyStore.Unregister(_hwnd.Handle);
+
                 RefreshServiceMenu();
                 _icon.ShowBalloonTip(3000, Program.Title,
                     "Служба мониторинга удалена.\n" +
@@ -4215,6 +6165,7 @@ namespace UsbBlockTray
                         "Удалить сохранённые данные?\n" +
                         "  - whitelist (список разрешённых устройств)\n" +
                         "  - пароль защиты меню\n" +
+                        "  - журнал подключений и копирований\n" +
                         "Без подтверждения эти файлы останутся на месте",
                         Program.Title, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
                 {
@@ -4222,7 +6173,23 @@ namespace UsbBlockTray
                 }
             }
             if (deleteData)
+            {
+                // Журнал удаляем явно: на всякий случай, даже если папка
+                // почему-то не удалилась целиком.
+                UsbJournal.Clear();
                 TryDeleteDir(StorePaths.Directory);
+            }
+
+            // 4б) состояние наблюдения и горячая клавиша журнала
+            try
+            {
+                Registry.LocalMachine.DeleteSubKeyTree(
+                    @"SOFTWARE\USB_Block\JournalPresence", false);
+            }
+            catch
+            {
+            }
+            HotkeyStore.Clear();
 
             // 5) защищённая копия (Program Files\USB_Block)
             string running = Application.ExecutablePath;
@@ -4355,6 +6322,34 @@ namespace UsbBlockTray
 
         // Пункт 7: сначала пароль (установка или смена), потом - установка
         // службы. false - установка службы отменена пользователем.
+        // Задание комбинации клавиш журнала (при установке службы).
+        // Возвращает комбинацию для сохранения; null - пользователь отказался
+        // (установка службы отменяется). Пустая строка - согласился, но
+        // задавать ничего не хочет: тогда подставится комбинация по
+        // умолчанию.
+        private string AskHotkey()
+        {
+            string current = HotkeyStore.GetText();
+            while (true)
+            {
+                using (HotkeyCaptureForm form = new HotkeyCaptureForm(current))
+                {
+                    if (form.ShowDialog() != DialogResult.OK) return null;
+                    current = form.Hotkey;
+                }
+                if (!string.IsNullOrEmpty(current)) return current;
+
+                // Ничего не задано - предлагаем комбинацию по умолчанию,
+                // чтобы журнал всё-таки был на что открываться.
+                DialogResult dr = MessageBox.Show(
+                    "Комбинация не задана.\n\n" +
+                    "Использовать " + HotkeyStore.DefaultText + "?\n" +
+                    "(«Нет» - вернуться к выбору комбинации)",
+                    Program.Title, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (dr == DialogResult.Yes) return HotkeyStore.DefaultText;
+            }
+        }
+
         private bool AskSetPassword()
         {
             StringBuilder sb = new StringBuilder();
@@ -4574,6 +6569,12 @@ namespace UsbBlockTray
                     NotifyStore.Write(b.Serial, b.Label);
                 }
             }
+
+            // Журнал подключений и копирований. Работает и здесь, и в
+            // службе, но по мьютексу в каждый момент пишет только один из
+            // них: пока служба жива, журнал ведёт она.
+            try { UsbJournalMonitor.RunOnce(false); }
+            catch { }
         }
 
         protected override void ExitThreadCore()
@@ -4586,6 +6587,11 @@ namespace UsbBlockTray
             }
             if (_hwnd != null)
             {
+                // Снимаем горячую клавишу до разрушения окна, иначе она
+                // осталась бы висеть в системе до конца сеанса - с окном
+                // трея её больше некому обрабатывать.
+                try { HotkeyStore.Unregister(_hwnd.Handle); }
+                catch { }
                 try { _hwnd.DestroyHandle(); }
                 catch { }
                 _hwnd = null;
@@ -4708,12 +6714,49 @@ namespace UsbBlockTray
 
         public static void Run()
         {
+            // Пока трей жив, горячую клавишу держит он. Этот процесс
+            // регистрирует её "на всякий случай": пока трей работает,
+            // RegisterHotKey вернёт отказ (комбинация в системе одна), а
+            // после "Выход" из трея регистрация пройдёт - и журнал по-прежнему
+            // открывается. Никакой координации между процессами не нужно.
+            HiddenWindow hotkey = new HiddenWindow(null, NotifyService.HandleHotkey);
+            try
+            {
+                hotkey.EnsureCreated();
+                HotkeyStore.Register(hotkey.Handle);
+            }
+            catch
+            {
+            }
+
             _poll = new System.Windows.Forms.Timer();
             _poll.Interval = 2500;
             _poll.Tick += delegate { Poll(); };
             _poll.Start();
             Poll();
             Application.Run();
+        }
+
+        // Горячая клавиша в уведомителе: журнал открывает отдельный процесс
+        // (от администратора - сразу, от обычного пользователя - с запросом
+        // прав). Сам уведомитель журнал не показывает: он и так работает без
+        // интерфейса и прав может не иметь.
+        private static void HandleHotkey()
+        {
+            try
+            {
+                if (!Program.StartJournalViewer(!Program.IsAdministrator()))
+                {
+                    TraceLog("горячая клавиша: не удалось запустить просмотр журнала");
+                }
+                else
+                {
+                    TraceLog("горячая клавиша: запущен просмотр журнала (--journal)");
+                }
+            }
+            catch
+            {
+            }
         }
 
         private static void Poll()
@@ -5177,6 +7220,12 @@ namespace UsbBlockTray
                         // уже поставлено в очередь выше.
                     }
                 }
+
+                // Журнал подключений и копирований. Если служба работает,
+                // журнал ведёт она; если её остановили - подхватит трей.
+                // Решает мьютекс, дублей не будет.
+                try { UsbJournalMonitor.RunOnce(true); }
+                catch { }
             }
             catch
             {
@@ -5226,6 +7275,30 @@ namespace UsbBlockTray
             sb.AppendLine("Блокировка активна: " + PolicyManager.IsBlocked());
             sb.AppendLine("Пароль защиты меню: " +
                 (AdminPassword.IsSet() ? "установлен" : "не установлен"));
+
+            sb.AppendLine();
+            sb.AppendLine("--- Журнал подключений и копирований ---");
+            sb.AppendLine("Файл: " + StorePaths.JournalFile +
+                "  существует=" + File.Exists(StorePaths.JournalFile));
+            sb.AppendLine("Поколений: " + (StorePaths.JournalGenerations + 1) +
+                "  записей всего: " +
+                UsbJournal.TotalRecordCount().ToString(CultureInfo.InvariantCulture) +
+                "  в текущем файле: " +
+                UsbJournal.CurrentRecordCount().ToString(CultureInfo.InvariantCulture) +
+                "  размер всего: " +
+                UsbJournal.TotalSizeBytes().ToString(CultureInfo.InvariantCulture) + " байт");
+            sb.AppendLine("Ведёт журнал: " + JournalOwnerSummary());
+            sb.AppendLine("Последний опрос: файлов " +
+                UsbJournalMonitor.LastFileCount.ToString(CultureInfo.InvariantCulture) +
+                ", томов обрезано по лимиту " +
+                UsbJournalMonitor.LastTruncatedVolumes.ToString(CultureInfo.InvariantCulture));
+            if (!string.IsNullOrEmpty(UsbJournalMonitor.LastError))
+                sb.AppendLine("Ошибка наблюдения: " + UsbJournalMonitor.LastError);
+            if (!string.IsNullOrEmpty(UsbJournal.LastError))
+                sb.AppendLine("Ошибка журнала: " + UsbJournal.LastError);
+            sb.AppendLine("Горячая клавиша журнала: " + JournalHotkeySummary());
+            if (!string.IsNullOrEmpty(HotkeyStore.LastError))
+                sb.AppendLine("  ошибка регистрации: " + HotkeyStore.LastError);
 
             sb.AppendLine();
             sb.AppendLine("--- Whitelist ---");
@@ -5319,9 +7392,69 @@ namespace UsbBlockTray
             return 0;
         }
 
+        // Кто ведёт журнал на этой машине. --diag сам журнал не ведёт, поэтому
+        // смотрим на то, что видно снаружи: работает ли служба и жив ли
+        // трей. Если не работает никто - журнал пополняться не будет, и это
+        // надо видеть в диагностике, а не угадывать по пустому файлу.
+        private static string JournalOwnerSummary()
+        {
+            if (UsbJournalMonitor.IsOwner) return UsbJournalMonitor.OwnerName;
+            try
+            {
+                if (ServiceManager.IsInstalled())
+                {
+                    string st = ServiceManager.StatusText();
+                    if (st.IndexOf("Работает", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        st.IndexOf("Running", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        return "служба " + ServiceManager.ServiceName + " (" + st + ")";
+                    }
+                    return "служба " + ServiceManager.ServiceName + " установлена, но " +
+                        "остановлена (" + st + ") - журнал ведёт трей, если он запущен";
+                }
+            }
+            catch
+            {
+            }
+            if (TrayRunning()) return "трей (текущий пользователь)";
+            return "НЕ ВЕДЁТ НИКТО: служба не установлена и трей не запущен - " +
+                "журнал пополняться не будет";
+        }
+
+        // Комбинация журнала для --diag: сохранённая и разобранная по частям,
+        // чтобы было видно расхождение между записанной строкой и тем, что
+        // из неё получилось (бывает при правке реестра руками).
+        private static string JournalHotkeySummary()
+        {
+            string text = HotkeyStore.GetText();
+            if (string.IsNullOrEmpty(text)) return "не задана";
+            uint mods, vk;
+            if (!HotkeyStore.TryParse(text, out mods, out vk))
+                return text + "  (НЕ РАСПОЗНАЁТСЯ, не сработает)";
+            return text + "  -> Ctrl=" + ((mods & HotkeyStore.ModControl) != 0) +
+                " Alt=" + ((mods & HotkeyStore.ModAlt) != 0) +
+                " Shift=" + ((mods & HotkeyStore.ModShift) != 0) +
+                " Win=" + ((mods & HotkeyStore.ModWin) != 0) +
+                " клавиша=0x" + vk.ToString("X2", CultureInfo.InvariantCulture);
+        }
+
         // Работает ли сейчас отдельный процесс-уведомитель (--notify) в
         // текущей сессии (по командной строке процессов этого пользователя).
         private static bool NotifyRunning()
+        {
+            return ProcessRunning("--notify");
+        }
+
+        // Жив ли сейчас трей (процесс usb_block_tray.exe без служебных
+        // аргументов --logon/--notify/--diag/...).
+        private static bool TrayRunning()
+        {
+            return ProcessRunning(null);
+        }
+
+        // Ищет процесс usb_block_tray.exe; marker - требуемая часть
+        // командной строки (null - любой запуск без служебных аргументов).
+        private static bool ProcessRunning(string marker)
         {
             try
             {
@@ -5331,9 +7464,32 @@ namespace UsbBlockTray
                     foreach (ManagementBaseObject o in s.Get())
                     {
                         string cl = o["CommandLine"] as string;
-                        if (cl != null && cl.IndexOf("--notify",
-                            StringComparison.OrdinalIgnoreCase) >= 0)
-                            return true;
+                        if (cl == null) continue;
+                        if (marker != null)
+                        {
+                            if (cl.IndexOf(marker, StringComparison.OrdinalIgnoreCase) >= 0)
+                                return true;
+                            continue;
+                        }
+                        // Трей - это запуск без аргументов. Любой служебный
+                        // флаг (--notify, --logon, --diag, --selftest,
+                        // --journal, --testpopup, --service, --makecopies)
+                        // означает, что это не он.
+                        string[] flags =
+                        {
+                            "--notify", "-notify", "--logon", "-logon",
+                            "--diag", "-diag", "--selftest", "-selftest",
+                            "--journal", "-journal", "--testpopup", "-testpopup",
+                            "--service", "-service", "--makecopies", "-makecopies"
+                        };
+                        bool clean = true;
+                        foreach (string f in flags)
+                            if (cl.IndexOf(f, StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                clean = false;
+                                break;
+                            }
+                        if (clean) return true;
                     }
                 }
             }
@@ -5663,7 +7819,236 @@ namespace UsbBlockTray
                 sb.AppendLine("Password guard ERROR: " + ex.Message);
             }
 
+            // ---- Журнал: запись/чтение, дифф снимков, горячая клавиша ----
+            // Работаем во временной папке и отдельным набором поколений,
+            // чтобы не тронуть настоящий журнал машины.
+            string jDir = Path.Combine(Path.GetTempPath(),
+                "usb_selftest_journal_" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(jDir);
+                // Настоящий журнал машины не трогаем: на время проверок
+                // журнал пишет во временную папку.
+                UsbJournal.UseDirectoryForTest(jDir);
+
+                // 1) запись -> чтение: содержимое возвращается тем же,
+                //    а порядок обратный (свежие сверху)
+                int gens = StorePaths.JournalGenerations;
+                StorePaths.JournalGenerations = 0;      // только текущий файл
+                try
+                {
+                    UsbJournal.Write(UsbJournal.KindDeviceAdded, "SN=ТЕСТ | Модель=Проверка");
+                    UsbJournal.Write(UsbJournal.KindFileAdded, @"X:\папка\файл.txt | Размер=1 байт");
+                    UsbJournal.Write(UsbJournal.KindFileRenamed, @"X:\папка\новое.txt | X:\папка\старое.txt");
+                    List<string> back = UsbJournal.ReadRecent(0);
+                    bool roundTrip = back.Count == 3 &&
+                        back[0].Contains("старое.txt") &&
+                        back[1].Contains("файл.txt") &&
+                        back[2].Contains("Модель=Проверка") &&
+                        UsbJournal.CurrentRecordCount() == 3 &&
+                        // файл не должен содержать открытый текст
+                        !File.ReadAllText(UsbJournal.CurrentPath,
+                            System.Text.Encoding.ASCII).Contains("Проверка");
+                    sb.AppendLine("Journal write/read (encrypted, newest first): " +
+                        (roundTrip ? "OK" : "FAIL"));
+                }
+                catch (Exception ex)
+                {
+                    sb.AppendLine("Journal write/read ERROR: " + ex.Message);
+                }
+                finally
+                {
+                    StorePaths.JournalGenerations = gens;
+                }
+
+                // 1б) ротация: при переполнении текущего файла поколения
+                //     сдвигаются, ничего не теряется и порядок не ломается
+                try
+                {
+                    int gens2 = StorePaths.JournalGenerations;
+                    StorePaths.JournalGenerations = 3;      // journal_1.._3
+                    int max2 = UsbJournal.MaxRecordsPerFile;
+                    UsbJournal.MaxRecordsPerFile = 4;
+                    // Начинаем с чистого журнала: записи предыдущей проверки
+                    // иначе попали бы в первый файл и сбили счёт.
+                    UsbJournal.Clear();
+                    UsbJournal.ResetCountForTest();
+                    try
+                    {
+                        for (int i = 1; i <= 10; i++)
+                            UsbJournal.Write(UsbJournal.KindDeviceAdded,
+                                "SN=РОТАЦИЯ" + i.ToString(CultureInfo.InvariantCulture));
+
+                        List<string> rot = UsbJournal.ReadRecent(0);
+                        // 10 записей по 4 на файл: journal.dat - 2,
+                        // journal_1 - 4, journal_2 - 4; потерь быть не должно
+                        bool rotOk = rot.Count == 10 &&
+                            rot[0].Contains("РОТАЦИЯ10") &&
+                            rot[9].Contains("РОТАЦИЯ1") &&
+                            UsbJournal.TotalRecordCount() == 10;
+                        sb.AppendLine("Journal rotation: " +
+                            (rotOk ? "OK" : "FAIL") + " (всего " +
+                            rot.Count.ToString(CultureInfo.InvariantCulture) + " из 10, " +
+                            "в файле " +
+                            UsbJournal.CurrentRecordCount().ToString(CultureInfo.InvariantCulture) + ")");
+                    }
+                    finally
+                    {
+                        UsbJournal.MaxRecordsPerFile = max2;
+                        StorePaths.JournalGenerations = gens2;
+                        UsbJournal.ResetCountForTest();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    sb.AppendLine("Journal rotation ERROR: " + ex.Message);
+                }
+
+                // 2) дифф снимков: создание, изменение, удаление, переименование
+                try
+                {
+                    Dictionary<string, UsbJournalMonitor.FileStamp> a =
+                        new Dictionary<string, UsbJournalMonitor.FileStamp>(
+                            StringComparer.OrdinalIgnoreCase);
+                    Dictionary<string, UsbJournalMonitor.FileStamp> b =
+                        new Dictionary<string, UsbJournalMonitor.FileStamp>(
+                            StringComparer.OrdinalIgnoreCase);
+
+                    a[@"D:\a.txt"] = Stamp(10, 111);
+                    a[@"D:\b.txt"] = Stamp(20, 222);
+                    a[@"D:\c.txt"] = Stamp(30, 333);
+                    a[@"D:\sub\d.txt"] = Stamp(40, 444);
+
+                    b[@"D:\a.txt"] = Stamp(10, 111);      // без изменений
+                    b[@"D:\b.txt"] = Stamp(99, 555);      // изменён
+                    // c.txt исчез, e.txt появился с тем же размером и тем же
+                    // временем изменения - это переименование. Новый файл
+                    // намеренно кладём в ПОДПАПКУ: если бы он лежал в той же
+                    // папке, в ней было бы два "создан" и переименование
+                    // (один удалён + один создан) не распозналось бы.
+                    b[@"D:\e.txt"] = Stamp(30, 333);
+                    b[@"D:\sub\d.txt"] = Stamp(40, 444);
+                    b[@"D:\sub\new.txt"] = Stamp(50, 555);  // создан
+
+                    List<string> diff = UsbJournalMonitor.Diff(a, b);
+                    int added = 0, changed = 0, removed = 0, renamed = 0;
+                    foreach (string e in diff)
+                    {
+                        string kind = e.Split('\t')[0];
+                        if (kind == UsbJournal.KindFileAdded) added++;
+                        else if (kind == UsbJournal.KindFileChanged) changed++;
+                        else if (kind == UsbJournal.KindFileRemoved) removed++;
+                        else if (kind == UsbJournal.KindFileRenamed) renamed++;
+                    }
+                    bool diffOk = added == 1 && changed == 1 && removed == 0 && renamed == 1 &&
+                        diff.Count == 3;
+                    sb.AppendLine("Journal diff (add/change/remove/rename): " +
+                        (diffOk
+                            ? "OK (+" + added + " ~" + changed + " -" + removed +
+                              " >" + renamed + ")"
+                            : "FAIL (+" + added + " ~" + changed + " -" + removed +
+                              " >" + renamed + ", всего " + diff.Count + ")"));
+                }
+                catch (Exception ex)
+                {
+                    sb.AppendLine("Journal diff ERROR: " + ex.Message);
+                }
+
+                // 3) обход тома на временной папке: служебные папки пропускаются,
+                //    найденные файлы попадают в снимок
+                try
+                {
+                    string root = Path.Combine(jDir, "vol");
+                    Directory.CreateDirectory(Path.Combine(root, "$RECYCLE.BIN"));
+                    File.WriteAllText(Path.Combine(root, "плоский.txt"), "a");
+                    File.WriteAllText(Path.Combine(root, "$RECYCLE.BIN", "мусор.txt"), "b");
+                    Dictionary<string, UsbJournalMonitor.FileStamp> scanned;
+                    bool truncated;
+                    UsbJournalMonitor.ScanVolume(root, out scanned, out truncated);
+                    bool scanOk = !truncated &&
+                        scanned.ContainsKey(Path.Combine(root, "плоский.txt")) &&
+                        scanned.Count == 1;
+                    sb.AppendLine("Journal volume scan: " + (scanOk ? "OK" : "FAIL") +
+                        " (файлов " + scanned.Count + ", служебные пропущены)");
+                }
+                catch (Exception ex)
+                {
+                    sb.AppendLine("Journal volume scan ERROR: " + ex.Message);
+                }
+
+                // 3б) два раздела одного накопителя: серийный номер общий,
+                //     и снимок второго не должен затирать снимок первого
+                try
+                {
+                    UsbVolume p1 = new UsbVolume();
+                    p1.Serial = "ОДИН_SN";
+                    p1.DiskId = @"\\.\PHYSICALDRIVE2";
+                    p1.DriveLetter = "E";
+                    UsbVolume p2 = new UsbVolume();
+                    p2.Serial = "ОДИН_SN";
+                    p2.DiskId = @"\\.\PHYSICALDRIVE3";
+                    p2.DriveLetter = "F";
+                    string k1 = UsbJournalMonitor.VolumeKey(p1);
+                    string k2 = UsbJournalMonitor.VolumeKey(p2);
+                    bool partOk = k1 != null && k2 != null &&
+                        !string.Equals(k1, k2, StringComparison.OrdinalIgnoreCase);
+                    sb.AppendLine("Journal multi-partition key: " +
+                        (partOk ? "OK" : "FAIL"));
+                }
+                catch (Exception ex)
+                {
+                    sb.AppendLine("Journal multi-partition key ERROR: " + ex.Message);
+                }
+
+                // 4) горячая клавиша: разбор и форматирование
+                try
+                {
+                    uint mods, vk;
+                    bool parseMain = HotkeyStore.TryParse("Ctrl+Alt+U", out mods, out vk);
+                    bool parseMods = mods == (HotkeyStore.ModControl | HotkeyStore.ModAlt);
+                    bool parseVk = vk == (uint)Keys.U;
+                    bool format = parseMain && HotkeyStore.Format(mods, vk) == "Ctrl+Alt+U";
+                    // без модификатора - нельзя: перехватили бы набор текста
+                    uint m2, v2;
+                    bool noMod = !HotkeyStore.TryParse("U", out m2, out v2);
+                    // сам модификатор основной клавишей быть не может
+                    bool bareMod = !HotkeyStore.TryParse("Ctrl+Shift", out m2, out v2);
+                    bool badName = !HotkeyStore.TryParse("Ctrl+НетТакой", out m2, out v2);
+                    bool empty = !HotkeyStore.TryParse("", out m2, out v2);
+                    bool keyOk = parseMain && parseMods && parseVk && format &&
+                        noMod && bareMod && badName && empty;
+                    sb.AppendLine("Hotkey parse: " + (keyOk ? "OK" : "FAIL") +
+                        " (mods=" + parseMods + " vk=" + parseVk + " fmt=" + format +
+                        " без_мод=" + noMod + " мод_как_клавиша=" + bareMod +
+                        " плохое_имя=" + badName + " пусто=" + empty + ")");
+                }
+                catch (Exception ex)
+                {
+                    sb.AppendLine("Hotkey parse ERROR: " + ex.Message);
+                }
+            }
+            finally
+            {
+                // Возвращаем журналу настоящую папку и убираем временную.
+                UsbJournal.UseDirectoryForTest(null);
+                try
+                {
+                    Directory.Delete(jDir, true);
+                }
+                catch
+                {
+                }
+            }
+
             return sb.ToString().Replace(Environment.NewLine, " | ");
+        }
+
+        private static UsbJournalMonitor.FileStamp Stamp(long size, long writtenTicks)
+        {
+            UsbJournalMonitor.FileStamp s;
+            s.Size = size;
+            s.WrittenTicks = writtenTicks;
+            return s;
         }
 
         private static bool SameBytes(byte[] a, byte[] b)
