@@ -3268,11 +3268,13 @@ namespace UsbBlockTray
             return true;
         }
 
-        private static string DescribeDevice(StorageDevice d, List<DeviceEntry> wl, bool blocked)
+        // Описание накопителя для записи журнала. VID:PID здесь НЕ пишется:
+        // это идентификатор узла USB, по которому устройство и так опознаётся
+        // по серийному номеру, а в журнале он только засоряет строку.
+        internal static string DescribeDevice(StorageDevice d, List<DeviceEntry> wl, bool blocked)
         {
             StringBuilder sb = new StringBuilder();
             sb.Append("SN=").Append(string.IsNullOrEmpty(d.Serial) ? "-" : d.Serial);
-            sb.Append(" | VID:PID=").Append(string.IsNullOrEmpty(d.UsbId) ? "-" : d.UsbId);
             sb.Append(" | Модель=").Append(string.IsNullOrEmpty(d.Model) ? "-" : d.Model);
             sb.Append(" | Метка=").Append(string.IsNullOrEmpty(d.Label) ? "-" : d.Label);
             sb.Append(" | Блокировка=").Append(blocked ? "включена" : "выключена");
@@ -3496,12 +3498,19 @@ namespace UsbBlockTray
                 return count;
             }
 
-            string device = " | SN=" + (string.IsNullOrEmpty(v.Serial) ? "-" : v.Serial) +
-                " | Модель=" + (string.IsNullOrEmpty(v.Model) ? "-" : v.Model) +
-                " | Метка=" + VolumeLabelOf(v.DriveLetter);
             foreach (string ev in events)
-                UsbJournal.WriteRaw(FormatEvent(ev) + device);
+                UsbJournal.WriteRaw(FormatEvent(ev) + VolumeDeviceInfo(v));
             return count;
+        }
+
+        // Сведения о накопителе, дописываемые к каждой записи о файле.
+        // Модели здесь нет: она уже есть в записи о подключении накопителя,
+        // а в строке каждого файла она только повторяется (при копировании
+        // тысяч файлов это тысячи лишних символов).
+        internal static string VolumeDeviceInfo(UsbVolume v)
+        {
+            return " | SN=" + (string.IsNullOrEmpty(v.Serial) ? "-" : v.Serial) +
+                " | Метка=" + VolumeLabelOf(v.DriveLetter);
         }
 
         private static string VolumeLabelOf(string letter)
@@ -8249,6 +8258,38 @@ foreach (string path in oldFiles.Keys)
                 {
                     JournalSettings.UseEnabledForTest(null);
                     sb.AppendLine("Journal switch ERROR: " + ex.Message);
+                }
+
+                // 3в) состав записей: в записи о подключении не должно быть
+                //      VID:PID, в записи о файле - модели накопителя
+                try
+                {
+                    StorageDevice sd = new StorageDevice();
+                    sd.Serial = "SN_ПРОВЕРКА";
+                    sd.UsbId = @"USB\VID_8564&PID_1000\081NS9HV47JMZLUQ";
+                    sd.Model = "Модель_Проверка";
+                    sd.Label = "Метка_Проверка";
+                    // DiskDeviceId не задан - буква не ищется, WMI не трогается
+                    string devLine = UsbJournalMonitor.DescribeDevice(sd, null, false);
+
+                    UsbVolume uv = new UsbVolume();
+                    uv.Serial = "SN_ПРОВЕРКА";
+                    uv.Model = "Модель_Проверка";
+                    string fileLine = UsbJournalMonitor.VolumeDeviceInfo(uv);
+
+                    bool fieldsOk =
+                        devLine.IndexOf("VID:PID", StringComparison.OrdinalIgnoreCase) < 0 &&
+                        devLine.IndexOf("SN_ПРОВЕРКА", StringComparison.Ordinal) >= 0 &&
+                        devLine.IndexOf("Модель_Проверка", StringComparison.Ordinal) >= 0 &&
+                        fileLine.IndexOf("Модель", StringComparison.OrdinalIgnoreCase) < 0 &&
+                        fileLine.IndexOf("SN_ПРОВЕРКА", StringComparison.Ordinal) >= 0 &&
+                        fileLine.IndexOf("Метка", StringComparison.OrdinalIgnoreCase) >= 0;
+                    sb.AppendLine("Journal record fields (no VID:PID / no Модель in files): " +
+                        (fieldsOk ? "OK" : "FAIL") + " [" + devLine + "] [" + fileLine + "]");
+                }
+                catch (Exception ex)
+                {
+                    sb.AppendLine("Journal record fields ERROR: " + ex.Message);
                 }
 
                 // 4) горячая клавиша: разбор и форматирование
