@@ -8,7 +8,8 @@ USB-блокировка (трей) — usb_block_tray.exe
 ------------
 - usb_block_tray.cs   - исходный код (C#/.NET 4)
 - usb_block_tray.exe  - собранная программа (csc, winexe, трейлер USBICON)
-- stop_usb.jpg/.ico   - картинка иконки (трей и значок exe)
+- stop_usb.jpg/.ico   - значок: .ico встраивается в exe ресурсом и рисуется
+                       в трее, .jpg кладётся трейлером как запасная картинка
 - Readme.txt          - этот файл
 - HISTORY.txt         - история работы над проектом
 - diag.log/selftest.log - результаты диагностики и автотестов
@@ -367,12 +368,21 @@ S-1-5-11 — чтение). Автозапуск и служба использ�
 -------------------------
   csc -target:winexe -platform:anycpu -win32icon:stop_usb.ico
       -win32manifest:app.manifest
+      -resource:stop_usb.ico,usb_block.tray.ico
       -r:System.Windows.Forms.dll -r:System.Drawing.dll
       -r:System.Management.dll -r:System.ServiceProcess.dll
       -out:usb_block_tray.exe usb_block_tray.cs
 После сборки в конец exe добавляется трейлер [jpg][uint32 длина]["USBICON"]
-со stop_usb.jpg (csc его не создаёт) — иконка трея берётся из картинки.
+со stop_usb.jpg (csc его не создаёт) — это запасная картинка значка трея.
 В Git Bash аргументы /r: подменяются на пути — использовать -r: (с дефисом).
+
+Значок в трее берётся из файла stop_usb.ico, встроенного в exe ресурсом
+usb_block.tray.ico (благодаря -resource в сборке), и выбирается картинка
+32x32: Windows сама уменьшит её под размер трея, а на 32x32 сглаживание
+заметно лучше, чем на 16x16. Если ресурса нет или он повреждён, программа
+берёт картинку из трейлера (stop_usb.jpg), а если и её нет — рисует
+простую иконку кодом. Самопроверка проверяет это: «Tray icon (stop_usb.ico):
+OK (ресурс=True размер=32x32)».
 
 Диагностика: usb_block_tray.exe --diag и --selftest (selftest.log). Результаты
 пишутся в diag.log/selftest.log рядом с exe (у администратора) либо в %TEMP%

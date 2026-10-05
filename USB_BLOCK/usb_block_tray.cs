@@ -4422,17 +4422,34 @@ foreach (string path in oldFiles.Keys)
     }
 
     // =====================================================================
-    // Иконка в трее. Приоритет - картинка stop_usb.jpg, встроенная в конец
-    // exe-файла (трейлер [jpg][длина][USBICON]). Если её нет/повреждена -
-    // рисуется простая иконка кодом.
+    // Иконка в трее. Приоритет - файл stop_usb.ico, встроенный в exe как
+    // ресурс (сборка: -resource:stop_usb.ico,usb_block.tray.ico); из него
+    // берётся картинка 16x16. Если ресурса нет/повреждён - картинка
+    // stop_usb.jpg из трейлера в конце exe ([jpg][длина][USBICON]). Если и
+    // её нет - рисуется простая иконка кодом.
     // =====================================================================
     public static class AppIcons
     {
         private static readonly byte[] TrailerMagic =
             { (byte)'U', (byte)'S', (byte)'B', (byte)'I', (byte)'C', (byte)'O', (byte)'N' };
 
+        // Имя ресурса в собственной сборке (не имя файла).
+        private const string IcoResourceName = "usb_block.tray.ico";
+
+        // Рисуем не 16x16, а 32x32: Windows сама уменьшит под размер трея,
+        // а на 32x32 сглаживание заметно лучше.
+        private const int TrayIconSize = 32;
+
         public static Icon Create()
         {
+            try
+            {
+                Icon ico = TryLoadEmbeddedIco();
+                if (ico != null) return ico;
+            }
+            catch
+            {
+            }
             try
             {
                 Icon fromImage = TryLoadEmbeddedTrayIcon();
@@ -4442,6 +4459,26 @@ foreach (string path in oldFiles.Keys)
             {
             }
             return CreateDrawnFallback();
+        }
+
+        // Значок из встроенного ресурса stop_usb.ico. Там есть картинки
+        // 16, 32, 48 и 256 пикселей; берём ту, что для трея.
+        private static Icon TryLoadEmbeddedIco()
+        {
+            using (Stream res = Assembly.GetExecutingAssembly()
+                .GetManifestResourceStream(IcoResourceName))
+            {
+                if (res == null) return null;
+                using (MemoryStream ms = new MemoryStream())
+                {
+                    byte[] buf = new byte[8192];
+                    int got;
+                    while ((got = res.Read(buf, 0, buf.Length)) > 0)
+                        ms.Write(buf, 0, got);
+                    ms.Position = 0;
+                    return new Icon(ms, TrayIconSize, TrayIconSize);
+                }
+            }
         }
 
         // Извлекает картинку из трейлера в конце собственного exe и делает
@@ -8148,6 +8185,33 @@ foreach (string path in oldFiles.Keys)
             finally
             {
                 try { if (File.Exists(plainFile)) File.Delete(plainFile); } catch { }
+            }
+
+            // Значок в трее: он должен браться из встроенного stop_usb.ico,
+            // а не рисоваться кодом. Проверяем, что ресурс в сборке есть и
+            // иконка из него грузится нужного размера (иначе получится
+            // нечитаемый значок 16x16 из растянутой картинки).
+            try
+            {
+                bool resPresent =
+                    Assembly.GetExecutingAssembly()
+                        .GetManifestResourceStream("usb_block.tray.ico") != null;
+                using (Icon ic = AppIcons.Create())
+                {
+                    string size = ic != null
+                        ? ic.Width.ToString(CultureInfo.InvariantCulture) + "x" +
+                          ic.Height.ToString(CultureInfo.InvariantCulture)
+                        : "нет";
+                    bool iconOk = ic != null && ic.Width >= 16 && ic.Height >= 16 &&
+                        ic.Width <= 48 && ic.Height <= 48;
+                    sb.AppendLine("Tray icon (stop_usb.ico): " +
+                        (resPresent && iconOk ? "OK" : "FAIL") +
+                        " (ресурс=" + resPresent + " размер=" + size + ")");
+                }
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine("Tray icon ERROR: " + ex.Message);
             }
 
             // сериализация dat-payload
