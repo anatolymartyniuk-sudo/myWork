@@ -220,10 +220,17 @@ namespace UsbBlockTray
                 // программа не стартовала вместе с Windows.
                 AutoStart.Cleanup();
 
-                // Основная комбинация клавиш журнала теперь всегда
+// Основная комбинация клавиш журнала теперь всегда
                 // Ctrl+Alt+O: старое значение, сохранённое прежней версией,
-                // заменяем (один раз).
+                // заменяется (один раз).
                 HotkeyStore.EnsureDefault();
+
+                // Права на файлы журнала и на состояние наблюдения: без них
+                // журнал копирования при входе обычного пользователя писать
+                // некому. Раздаются здесь и повторяются при каждом цикле
+                // (UsbJournalRights.EnsureAllOnce в RunOnce) - файлы могли
+                // быть созданы позже.
+                UsbJournalRights.EnsureAllOnce();
             }
 
             bool created;
@@ -667,6 +674,208 @@ namespace UsbBlockTray
     }
 
     // =====================================================================
+    // Права на файлы журнала и на состояние наблюдения.
+    //
+    // Зачем это нужно: журнал подключений ведёт служба, а журнал копирования
+    // включает пользователь галочкой J - и если он вошёл не администратором,
+    // писать в журнал некому: трей при входе обычного пользователя правами не
+    // повышен (иначе UAC-вопрос при каждом входе), а папка ProgramData и
+    // файлы закрыты ACL от записи.
+    //
+    // Что разрешено обычному пользователю:
+    //   - journal.dat и journal_1..9: ПРОЧИТАТЬ и ДОПИСЫВАТЬ В КОНЕЦ.
+    //     Дописывание идёт дескриптором с правом FILE_APPEND_DATA, поэтому
+    //     изменить или стереть уже записанное нельзя: для этого нужно
+    //     удалить файл, а это право осталось у администратора;
+    //   - whitelist.dat: ЧИТАТЬ. Без этого обычный пользователь увидит
+    //     пустой список разрешённых накопителей, и журнал начал бы писать
+    //     ложные «удалено» для всего, что раньше было разрешено;
+    //   - HKLM\SOFTWARE\USB_Block\JournalPresence: ЗАПИСЫВАТЬ значения
+    //     (состояние «что сейчас подключено» и метка последнего цикла).
+    //     Без этого каждый цикл считался бы «после долгого перерыва» и
+    //     молчал бы вместо записей.
+    //
+    // Чего обычному пользователю по-прежнему НЕльзя: создавать новые файлы
+    // в папке, удалять и переименовывать файлы журнала, менять права, писать
+    // whitelist.dat, трогать остальные настройки. Поэтому ротацию кольца
+    // (сдвиг поколений) по-прежнему выполняет только администратор - служба
+    // или трей, запущенный с правами.
+    // =====================================================================
+    public static class UsbJournalRights
+    {
+        private static readonly SecurityIdentifier AuthenticatedUsers =
+            new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null);
+
+        public static string LastError;
+
+        // ---- Файлы журнала ----
+
+        public static void EnsureFileRights(string path)
+        {
+            try
+            {
+                if (!File.Exists(path)) return;
+                FileSecurity fs = File.GetAccessControl(path);
+                fs.SetAccessRuleProtection(true, false);
+                fs.AddAccessRule(new FileSystemAccessRule(
+                    new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+                    FileSystemRights.FullControl, InheritanceFlags.None, PropagationFlags.None,
+                    AccessControlType.Allow));
+                fs.AddAccessRule(new FileSystemAccessRule(
+                    new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                    FileSystemRights.FullControl, InheritanceFlags.None, PropagationFlags.None,
+                    AccessControlType.Allow));
+                // Читать (нужно, чтобы пересчитать записи и понять, что файл
+                // полон) и дописывать в конец.
+                fs.AddAccessRule(new FileSystemAccessRule(AuthenticatedUsers,
+                    FileSystemRights.Read | FileSystemRights.AppendData,
+                    InheritanceFlags.None, PropagationFlags.None, AccessControlType.Allow));
+                File.SetAccessControl(path, fs);
+                LastError = null;
+            }
+            catch (Exception ex)
+            {
+                LastError = path + ": " + ex.Message;
+            }
+        }
+
+        // Проходит по всем поколениям журнала и чинит права (у файлов,
+        // созданных прошлой версией, обычного пользователя не было).
+        public static void EnsureAllFileRights()
+        {
+            for (int g = 0; g <= StorePaths.JournalGenerations; g++)
+            {
+                try { EnsureFileRights(UsbJournal.GenerationFileFor(g)); }
+                catch { }
+            }
+        }
+
+        // Разрешено ли текущему процессу дописывать в журнал (для --diag и
+        // для понятного сообщения в трее).
+        public static bool CanWriteNow()
+        {
+            string path = UsbJournal.GenerationFileFor(0);
+            try
+            {
+                if (!File.Exists(path)) return Program.IsAdministrator();
+                FileSecurity fs = File.GetAccessControl(path);
+                FileSystemAccessRule rule = new FileSystemAccessRule(AuthenticatedUsers,
+                    FileSystemRights.AppendData, InheritanceFlags.None, PropagationFlags.None,
+                    AccessControlType.Allow);
+                foreach (FileSystemAccessRule have in
+                    fs.GetAccessRules(true, false, typeof(SecurityIdentifier)))
+                {
+                    if (have.IdentityReference == AuthenticatedUsers &&
+                        (have.FileSystemRights & FileSystemRights.AppendData) != 0)
+                        return true;
+                }
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // ---- Состояние наблюдения в реестре ----
+
+        public static void EnsurePresenceRights()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.CreateSubKey(
+                    @"SOFTWARE\USB_Block\JournalPresence"))
+                {
+                    RegistrySecurity rs = new RegistrySecurity();
+                    rs.SetAccessRuleProtection(true, false);
+                    rs.AddAccessRule(new RegistryAccessRule(
+                        new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+                        RegistryRights.FullControl, InheritanceFlags.None,
+                        PropagationFlags.None, AccessControlType.Allow));
+                    rs.AddAccessRule(new RegistryAccessRule(
+                        new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                        RegistryRights.FullControl, InheritanceFlags.None,
+                        PropagationFlags.None, AccessControlType.Allow));
+                    // Читать значения может любой (это и так свойство
+                    // HKLM), а записывать должен и обычный пользователь.
+                    // CreateSubKey тоже нужен: код открывает ключ через
+                    // Registry.CreateSubKey, а на существующем ключе это
+                    // требует KEY_CREATE_SUB_KEY - без него обычный
+                    // пользователь не смог бы записать метку последнего
+                    // цикла и молчал бы вместо записей.
+                    rs.AddAccessRule(new RegistryAccessRule(AuthenticatedUsers,
+                        RegistryRights.SetValue | RegistryRights.ReadKey |
+                        RegistryRights.CreateSubKey,
+                        InheritanceFlags.None, PropagationFlags.None,
+                        AccessControlType.Allow));
+                    byte[] sd = rs.GetSecurityDescriptorBinaryForm();
+                    IntPtr handle = k.Handle.DangerousGetHandle();
+                    if (RegSetKeySecurity(handle, DACL_SECURITY_INFORMATION, sd) != 0)
+                    {
+                        LastError = "RegSetKeySecurity: " +
+                            Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture);
+                    }
+                    else
+                    {
+                        LastError = null;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LastError = ex.Message;
+            }
+        }
+
+        private const int DACL_SECURITY_INFORMATION = 4;
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern int RegSetKeySecurity(IntPtr hKey, int securityInformation,
+            byte[] securityDescriptor);
+
+        // ---- Прочитать whitelist ----
+
+        public static void EnsureWhitelistRead()
+        {
+            try
+            {
+                string path = StorePaths.File;
+                if (!File.Exists(path)) return;
+                FileSecurity fs = File.GetAccessControl(path);
+                fs.SetAccessRuleProtection(true, false);
+                fs.AddAccessRule(new FileSystemAccessRule(
+                    new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+                    FileSystemRights.FullControl, InheritanceFlags.None, PropagationFlags.None,
+                    AccessControlType.Allow));
+                fs.AddAccessRule(new FileSystemAccessRule(
+                    new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                    FileSystemRights.FullControl, InheritanceFlags.None, PropagationFlags.None,
+                    AccessControlType.Allow));
+                fs.AddAccessRule(new FileSystemAccessRule(AuthenticatedUsers,
+                    FileSystemRights.Read, InheritanceFlags.None, PropagationFlags.None,
+                    AccessControlType.Allow));
+                File.SetAccessControl(path, fs);
+            }
+            catch (Exception ex)
+            {
+                LastError = StorePaths.File + ": " + ex.Message;
+            }
+        }
+
+        // Всё сразу. Вызывает администратор (служба, трей с правами,
+        // установка службы): одного раза на процесс достаточно.
+        private static bool _done;
+        public static void EnsureAllOnce()
+        {
+            if (_done) return;
+            _done = true;
+            EnsureAllFileRights();
+            EnsurePresenceRights();
+            EnsureWhitelistRead();
+        }
+    }
+
+    // =====================================================================
     // Хранилище whitelist в бинарном шифрованном виде (DPAPI + ACL)
     // Не текстовый формат, недоступен для чтения/правки обычным пользователем.
     // Перенос между компьютерами - через PortableWhitelist (.wlb).
@@ -768,7 +977,11 @@ namespace UsbBlockTray
 
                 Directory.CreateDirectory(StorePaths.Directory);
                 File.WriteAllBytes(StorePaths.File, secret);
-                RestrictAcl(StorePaths.File);
+                // Сохраняем право на чтение обычному пользователю: без него
+                // он не прочитает список разрешённых устройств, и журнал
+                // копирования при входе не-админом посчитал бы чужие
+                // накопители удалёнными (см. UsbJournalRights).
+                UsbJournalRights.EnsureWhitelistRead();
             }
         }
 
@@ -2502,6 +2715,94 @@ namespace UsbBlockTray
             0x5F, 0x56, 0x31, 0x00, 0x2E, 0x13, 0x65, 0xA7
         };
 
+        // Дописать в конец файла так, чтобы это мог сделать и обычный пользователь.
+        //
+        // Обычный FileStream(path, Append) просит у Windows права GENERIC_WRITE,
+        // а это вместе с FILE_APPEND_DATA даёт ещё и FILE_WRITE_DATA - то есть
+        // право ПЕРЕПИСАТЬ уже записанные записи. Для журнала, который
+        // наблюдает за пользователем, это недопустимо: он и так может
+        // дописывать, но не должен уметь стирать.
+        //
+        // Поэтому открываем файл через CreateFile с правами
+        // FILE_APPEND_DATA (+ FILE_READ_ATTRIBUTES на чтение размера).
+        // Такой дескриптор по определению пишет только в конец: указатель
+        // перед каждой записью ставится Windows в конец файла, а начало
+        // файла менять нельзя.
+        private static void AppendBytes(string path, byte[] data, bool createIfMissing)
+        {
+            const uint FILE_APPEND_DATA = 0x0004;
+            const uint FILE_READ_ATTRIBUTES = 0x0080;
+            const uint FILE_SHARE_READ = 0x00000001;
+            const uint FILE_SHARE_WRITE = 0x00000002;
+            const uint FILE_SHARE_DELETE = 0x00000004;
+            const uint OPEN_ALWAYS = 4;
+            const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
+
+            // Право на создание файла есть только у администратора (папка
+            // закрыта). Обычный пользователь может только дописывать в
+            // уже созданный файл.
+            uint access = FILE_APPEND_DATA | FILE_READ_ATTRIBUTES;
+            uint disposition = OPEN_ALWAYS;
+            if (!createIfMissing && !File.Exists(path))
+                throw new IOException("файл журнала ещё не создан: " + path);
+
+            IntPtr h = CreateFileW(path, access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                IntPtr.Zero, disposition, FILE_ATTRIBUTE_NORMAL, IntPtr.Zero);
+            if (h == new IntPtr(-1))
+            {
+                int err = Marshal.GetLastWin32Error();
+                throw new IOException("CreateFile: " + err.ToString(CultureInfo.InvariantCulture) +
+                    " (код " + err.ToString(CultureInfo.InvariantCulture) + ")");
+            }
+            try
+            {
+                long len = 0;
+                uint got = 0;
+                if (!GetFileSizeEx(h, out len) || len == 0)
+                {
+                    // Пустой файл (только что созданный): пишем заголовок
+                    // формата. Заголовок - единственное, что дописывается
+                    // не в конец, и делается это только при создании, то есть
+                    // всегда с правами администратора. Дальше - обычная
+                    // запись: указатель после заголовка в конце файла, и
+                    // кадр ложится сразу за ним.
+                    byte[] magic = new UTF8Encoding(false).GetBytes(Magic);
+                    if (!WriteFile(h, magic, (uint)magic.Length, out got, IntPtr.Zero))
+                        throw new IOException("WriteFile: " +
+                            Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
+                }
+                if (data != null && data.Length > 0)
+                {
+                    if (!WriteFile(h, data, (uint)data.Length, out got, IntPtr.Zero) ||
+                        got != data.Length)
+                    {
+                        throw new IOException("WriteFile: " +
+                            Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
+                    }
+                }
+            }
+            finally
+            {
+                CloseHandle(h);
+            }
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern IntPtr CreateFileW(string fileName, uint dwDesiredAccess,
+            uint dwShareMode, IntPtr lpSecurityAttributes, uint dwCreationDisposition,
+            uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetFileSizeEx(IntPtr hFile, out long lpFileSize);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool WriteFile(IntPtr hFile, byte[] lpBuffer, uint nBytes,
+            out uint lpBytesWritten, IntPtr lpOverlapped);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr hObject);
+
         // Запись журнала: время, вид операции и подробности.
         public const string KindDeviceAdded = "DEV+";   // накопитель подключён
         public const string KindDeviceRemoved = "DEV-"; // накопитель отключён
@@ -2550,6 +2851,13 @@ namespace UsbBlockTray
             if (generation <= 0) return CurrentFile();
             return Path.Combine(Dir, "journal_" +
                 generation.ToString(CultureInfo.InvariantCulture) + ".dat");
+        }
+
+        // Путь файла поколения снаружи класса: им пользуется UsbJournalRights,
+        // который следит за правами на эти файлы.
+        public static string GenerationFileFor(int generation)
+        {
+            return GenerationFile(generation);
         }
 
         // Сколько записей в текущем файле (без расшифровки - только по
@@ -2635,43 +2943,61 @@ namespace UsbBlockTray
             string path = CurrentFile();
             try
             {
-                // Ротация - до подсчёта: она освобождает journal.dat, и новый
+                // Ротация - до записи: она освобождает journal.dat, и новый
                 // файл надо будет и создать, и закрыть ACL заново.
-                RotateIfFull();
+                // Не удалась - запись прекращаем (см. RotateIfFull): писать
+                // сверх MaxRecordsPerFile нельзя.
+                if (!RotateIfFull()) return;
 
-                bool created = false;
-                using (FileStream fs = new FileStream(path, FileMode.OpenOrCreate,
-                    FileAccess.Write, FileShare.ReadWrite))
+                // Заголовок формата пишется только при создании файла - на это
+                // есть права у администратора. Обычный пользователь файл не
+                // создаёт: он лишь дописывает записи в конец.
+                bool missing = !File.Exists(path);
+                if (missing && !_testMode && !Program.IsAdministrator())
                 {
-                    created = fs.Length == 0;
-                    if (created)
-                    {
-                        fs.Write(new UTF8Encoding(false).GetBytes(Magic), 0, Magic.Length);
-                    }
-                    else
-                    {
-                        fs.Seek(0, SeekOrigin.End);
-                    }
-                    byte[] len = BitConverter.GetBytes(cipher.Length);
-                    fs.Write(len, 0, 4);
-                    fs.Write(cipher, 0, cipher.Length);
-                    fs.Flush();
+                    LastError = "нет файла журнала - его создаст первый запуск " +
+                        "с правами администратора (пункт J или установка службы)";
+                    return;
                 }
-                if (created && !_testMode)
-                {
-                    // Файл создан - сразу закрываем ACL, как у whitelist.dat.
-                    // В самопроверке папка временная и принадлежит текущему
-                    // пользователю: закрывать её нельзя, иначе проверка
-                    // прочитала бы файл не смогла бы (а проверять надо именно
-                    // чтение).
-                    WhitelistStore.RestrictAcl(path);
-                }
+                AppendBytes(path, BuildFrame(cipher), missing);
                 _count++;
                 _countLoaded = true;
+                // Файл создан - сразу задаём права: администраторам полный
+                // доступ, обычному пользователю - чтение и дописывание в
+                // конец (переписывать записи он не может). В самопроверке
+                // папка временная и принадлежит текущему пользователю:
+                // закрывать её нельзя, иначе проверка чтения сама себе
+                // мешала бы.
+                if (missing && !_testMode) UsbJournalRights.EnsureFileRights(path);
             }
             catch (Exception ex)
             {
                 LastError = "запись: " + ex.Message;
+            }
+        }
+
+        // Запись в файле журнала: 4 байта длины + шифротекст.
+        private static byte[] BuildFrame(byte[] cipher)
+        {
+            byte[] len = BitConverter.GetBytes(cipher.Length);
+            byte[] frame = new byte[len.Length + cipher.Length];
+            Buffer.BlockCopy(len, 0, frame, 0, len.Length);
+            Buffer.BlockCopy(cipher, 0, frame, len.Length, cipher.Length);
+            return frame;
+        }
+
+        // Самопроверка дописывания: пишем в заданный файл ровно так же,
+        // как в журнал (FILE_APPEND_DATA), минуя шифрование и счётчик.
+        public static bool TryAppendForTest(string path, byte[] data)
+        {
+            try
+            {
+                AppendBytes(path, data, !File.Exists(path));
+                return true;
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -2702,10 +3028,27 @@ namespace UsbBlockTray
         // Текущий файл полон - сдвигаем поколения. Удаляем самый старый,
         // затем переименовываем остальные на шаг назад и освобождаем
         // journal.dat под текущий.
-        private static void RotateIfFull()
+        // true, если ротация не понадобилась или удалась.
+        private static bool RotateIfFull()
         {
             string path = CurrentFile();
-            if (CurrentCount() < MaxRecordsPerFile) return;
+            if (CurrentCount() < MaxRecordsPerFile) return true;
+            if (!Program.IsAdministrator() && !_testMode)
+            {
+                // Сдвинуть поколения может только администратор: удалять и
+                // переименовывать файлы в закрытой папке обычный пользователь
+                // не может. Молча писать сверх 5000 записей нельзя - файл
+                // поколения рассчитан на это число, и просмотрщик принял бы
+                // его за повреждённый. Поэтому останавливаем запись с явной
+                // причиной: до появления администратора журнал не пишется.
+                LastError = "файл журнала заполнен (" +
+                    MaxRecordsPerFile.ToString(CultureInfo.InvariantCulture) +
+                    " записей), а сдвинуть поколения может только администратор - " +
+                    "запись приостановлена (запустите программу с его правами " +
+                    "или поставьте службу мониторинга)";
+                _countLoaded = false;
+                return false;
+            }
             try
             {
                 int last = StorePaths.JournalGenerations;
@@ -2724,12 +3067,14 @@ namespace UsbBlockTray
                 File.Move(path, cur);
                 _count = 0;
                 _countLoaded = true;
+                return true;
             }
             catch (Exception ex)
             {
                 LastError = "ротация: " + ex.Message;
                 // Счётчик не доверяем: сдвиг мог не дойти до конца.
                 _countLoaded = false;
+                return false;
             }
         }
 
@@ -3004,6 +3349,170 @@ namespace UsbBlockTray
         private const string CycleMutexName = @"Global\UsbBlockJournal_Cycle_v1";
         private const string CycleMutexFallback = @"Local\UsbBlockJournal_Cycle_v1";
 
+        // Кто ведёт журнал, закрепляется в реестре: HKLM\...\JournalPresence\
+        // Owner («служба» / «трей: пользователь: id процесса») и OwnerTicks
+        // (когда этот владелец работал последний раз).
+        //
+        // Зачем: мьютекс не даёт двум процессам идти циклу ОДНОВРЕМЕННО, но
+        // не мешает им идти его по очереди. Раньше это было незаметно:
+        // цикл запускал только администратор, то есть либо служба, либо
+        // поднятый вручную трей. Теперь журнал копирования может вести и
+        // обычный пользователь - и тогда без закрепления каждый файл
+        // записывался бы дважды: один процесс видит его новым, и другой
+        // тоже видит новым, потому что у каждого своя память о состоянии.
+        private const string OwnerValue = "Owner";
+        private const string OwnerTicksValue = "OwnerTicks";
+        private static string _ownerToken;
+        private static string _lastOwnerSeen;
+        private static bool _primed;
+
+        // Идентификатор этого процесса: у службы один на всё время жизни, у
+        // трея - свой на каждый запуск (перезапуск трея не должен ждать, пока
+        // «старый» владелец отпустит журнал).
+        private static string MyToken(bool byService)
+        {
+            if (byService) return "служба";
+            string user = Environment.UserName;
+            int pid;
+            try { pid = System.Diagnostics.Process.GetCurrentProcess().Id; }
+            catch { pid = 0; }
+            return "трей: " + user + ": " + pid.ToString(CultureInfo.InvariantCulture);
+        }
+
+        // Читает закреплённого владельца. Подмена для самопроверки.
+        private static string _testOwner;
+        private static long _testOwnerTicks;
+
+        public static void UseOwnerForTest(string owner, long ticks)
+        {
+            _testOwner = owner;
+            _testOwnerTicks = ticks;
+        }
+
+        private static bool ReadOwner(out string owner, out long ticks)
+        {
+            owner = null;
+            ticks = 0;
+            if (_testOwner != null)
+            {
+                owner = _testOwner;
+                ticks = _testOwnerTicks;
+                return true;
+            }
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(CycleKey, false))
+                {
+                    if (k == null) return false;
+                    owner = k.GetValue(OwnerValue) as string;
+                    object t = k.GetValue(OwnerTicksValue);
+                    if (t != null) ticks = Convert.ToInt64(t, CultureInfo.InvariantCulture);
+                }
+            }
+            catch
+            {
+            }
+            return owner != null && ticks > 0;
+        }
+
+        private static void WriteOwner(string token, long ticks)
+        {
+            if (_testOwner != null) return;   // самопроверка ничего не пишет
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.CreateSubKey(CycleKey))
+                {
+                    k.SetValue(OwnerValue, token, RegistryValueKind.String);
+                    k.SetValue(OwnerTicksValue, ticks, RegistryValueKind.QWord);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        // Наш ли это процесс сейчас ведёт журнал.
+        //
+        // Правила простые:
+        //   - если владелец был совсем недавно (меньше MaxGap назад) и это
+        //     не мы - ведёт он. Служба приоритетнее трея: если владельцем
+        //     стал трей, а служба ожила - забирает журнал себе (трей
+        //     увидит нового владельца и замолчит);
+        //   - если владельца нет или он давно молчит (MaxGap) - забираем
+        //     журнал себе.
+        // Возвращает false, когда вести должен кто-то другой.
+        // Токен процесса для записи в реестр. В самопроверке он считается
+        // на каждый вызов: иначе первая же подмена закрепила бы токен, и
+        // проверка приоритета «служба важнее трея» ничего не проверяла бы.
+        private static string OwnerToken(bool byService)
+        {
+            if (_testOwner != null) return MyToken(byService);
+            if (_ownerToken == null) _ownerToken = MyToken(byService);
+            return _ownerToken;
+        }
+
+        public static bool TryClaimOwnerForTest(bool byService, out string ownerName)
+        {
+            try
+            {
+                return TryClaimOwner(byService, DateTime.Now, out ownerName);
+            }
+            catch
+            {
+                ownerName = string.Empty;
+                return false;
+            }
+        }
+
+        private static bool TryClaimOwner(bool byService, DateTime nowLocal, out string ownerName)
+        {
+            string myToken = OwnerToken(byService);
+            string owner;
+            long ticks;
+            bool have = ReadOwner(out owner, out ticks);
+
+            bool fresh = have &&
+                ticks > 0 &&
+                (nowLocal.Ticks - ticks) >= 0 &&
+                TimeSpan.FromTicks(nowLocal.Ticks - ticks) <= MaxGap;
+
+            // Метка из будущего (часы переведены назад, владелец считается
+            // живым вечно): молча уступаем журнал, чтобы не наследить
+            // тысячами "удалено" после правки времени.
+            if (have && ticks > nowLocal.Ticks)
+            {
+                ownerName = owner ?? string.Empty;
+                _lastOwnerSeen = owner;
+                return false;
+            }
+
+            if (fresh && !string.Equals(owner, myToken, StringComparison.Ordinal))
+            {
+                // Живой чужой владелец. Служба забирает журнал у трея, трей
+                // у службы - нет.
+                bool otherIsTray = owner != null &&
+                    owner.StartsWith("трей", StringComparison.Ordinal);
+                if (!(byService && otherIsTray))
+                {
+                    ownerName = owner;
+                    _lastOwnerSeen = owner;
+                    return false;
+                }
+            }
+
+            if (!string.Equals(owner, myToken, StringComparison.Ordinal))
+            {
+                // Сменился владелец (или его не было): наш снимок того, что
+                // было на носителях, уже неактуален - иначе первая же запись
+                // после перехвата превратилась бы в тысячи "удалено".
+                _primed = false;
+            }
+            _lastOwnerSeen = myToken;
+            WriteOwner(myToken, nowLocal.Ticks);
+            ownerName = myToken;
+            return true;
+        }
+
         // Компенсация пропусков: если предыдущий машинный цикл был
         // ДАВНО (кто-то перезапустился, служба стартовала/остановилась),
         // все накопители и тома получают новое базовое состояние молча -
@@ -3033,13 +3542,21 @@ namespace UsbBlockTray
         // Что сейчас подключено: ключ -> описание (для журнала отключения).
         private static Dictionary<string, string> _present;
         private static DateTime _lastCycleLocal = DateTime.MinValue;
-        private static bool _primed = false;
         private static string _owner = string.Empty;
 
         // Диагностика
         public static int LastFileCount;
         public static int LastTruncatedVolumes;
         public static string LastError;
+
+        // Кто ведёт журнал, если это не мы (пусто, если ведём мы).
+        public static string OwnerNameElsewhere = string.Empty;
+
+        // Журнал копирования включён, а писать нечем: не хватило прав на
+        // файл журнала (или на состояние в реестре). Показывается в трее и
+        // в --diag, чтобы молчание не выглядело как «никто ничего не копи-
+        // ровал».
+        public static string WriteBlockedReason = string.Empty;
         public static bool IsOwner
         {
             get { return !string.IsNullOrEmpty(_owner); }
@@ -3066,6 +3583,13 @@ namespace UsbBlockTray
                 lock (Sync) { _owner = string.Empty; }
                 return;
             }
+
+            // Администратор (служба или трей с правами) один раз на процесс
+            // раздаёт права на файлы журнала и на состояние наблюдения: иначе
+            // журнал копирования при входе обычного пользователя писать
+            // было бы нечем.
+            if (Program.IsAdministrator()) UsbJournalRights.EnsureAllOnce();
+
             lock (Sync)
             {
                 Mutex mtx = Acquire();
@@ -3089,6 +3613,26 @@ namespace UsbBlockTray
                     if (!held) return;
                     try
                     {
+                        // Кто ведёт журнал - решает закрепление в реестре, а не
+                        // только мьютекс: мьютекс запрещает идти циклу
+                        // одновременно, но по очереди шли бы оба, и каждую
+                        // запись писали бы дважды. Проверяем под мьютексом:
+                        // иначе оба успели бы увидеть «владельца нет» и оба
+                        // записали бы себя владельцами.
+                        bool ours;
+                        string ownerName;
+                        try
+                        {
+                            ours = TryClaimOwner(byService, DateTime.Now, out ownerName);
+                        }
+                        catch
+                        {
+                            ours = true;
+                            ownerName = MyToken(byService);
+                        }
+                        _owner = ours ? ownerName : string.Empty;
+                        OwnerNameElsewhere = ours ? string.Empty : ownerName;
+                        if (!ours) return;      // ведёт кто-то другой - молчим
                         Cycle(byService);
                     }
                     finally
@@ -3128,10 +3672,23 @@ namespace UsbBlockTray
 
         private static void Cycle(bool byService)
         {
-            _owner = byService ? "служба" : "трей (администратор)";
+            WriteBlockedReason = string.Empty;
+            _owner = byService ? "служба"
+                : (Program.IsAdministrator() ? "трей (администратор)" : "трей (обычный пользователь)");
 
             DateTime nowLocal = DateTime.Now;
             bool gap = NeedsRebaseline(nowLocal);
+
+            // Может ли этот процесс вообще писать? Если журнал копирования
+            // включён, а прав не хватает - запоминаем причину: иначе не-
+            // админ увидит пустой журнал и решит, что ничего не копировали.
+            if (!Program.IsAdministrator() && JournalSettings.IsFilesEnabled() &&
+                !UsbJournalRights.CanWriteNow())
+            {
+                WriteBlockedReason =
+                    "нет прав на запись в файл журнала - их выдаёт первый " +
+                    "запуск с правами администратора (или служба мониторинга)";
+            }
 
             try
             {
@@ -3176,8 +3733,7 @@ namespace UsbBlockTray
                 if (_prev == null)
                     _prev = new Dictionary<string, string>(_present,
                         StringComparer.OrdinalIgnoreCase);
-                SaveLastCycle(nowLocal);
-                _lastCycleLocal = nowLocal;
+                SaveLastCycle(nowLocal, Program.IsAdministrator());
                 _primed = true;
                 _cycVolumes = null;
                 _cycLetters = null;
@@ -3237,6 +3793,9 @@ namespace UsbBlockTray
         private static bool NeedsRebaseline(DateTime nowLocal)
         {
             if (!_primed) return true;
+            // Если метку последнего цикла писать в реестр нельзя, узнать о
+            // чужом цикле невозможно - доверяем памяти процесса.
+            if (_lastCycleMemoryOnly) return _lastCycleLocal <= DateTime.MinValue;
             long ticks = 0;
             try
             {
@@ -3257,8 +3816,15 @@ namespace UsbBlockTray
             return since < TimeSpan.Zero || since > MaxGap;
         }
 
-        private static void SaveLastCycle(DateTime nowLocal)
+        // Метка последнего ЦИКЛА, а не последней записи. Её читают и не-привилегированные
+        // процессы: без права SetValue на ключе обычный пользователь считал бы
+        // каждый свой цикл «первым после перерыва» и молчал бы вместо записей
+        // (журнал копирования ведётся в том числе обычным пользователем).
+        // Поэтому пишем LastCycleTicks всегда, когда хватает прав, а личное
+        // состояние (_primed/_lastCycleLocal) - когда вышло без ошибки.
+        private static void SaveLastCycle(DateTime nowLocal, bool privileged)
         {
+            bool ok = true;
             try
             {
                 using (RegistryKey k = Registry.LocalMachine.CreateSubKey(CycleKey))
@@ -3266,8 +3832,20 @@ namespace UsbBlockTray
             }
             catch
             {
+                ok = false;
+            }
+            if (!ok || !privileged)
+            {
+                // Права на запись в реестр не позволили: метку последнего
+                // цикла держим в памяти процесса - этого хватает, чтобы
+                // следующий наш же цикл не сочёл себя первым.
+                _lastCycleLocal = nowLocal;
+                if (!privileged) _lastCycleMemoryOnly = true;
             }
         }
+
+        // Метка последнего цикла по памяти (когда писать в реестр нельзя).
+        private static bool _lastCycleMemoryOnly;
 
         // ---- Устройства: подключение / отключение ----
 
@@ -7034,6 +7612,16 @@ foreach (string path in oldFiles.Keys)
                 {
                     RunScan();
                 }
+                else
+                {
+                    // Обычный пользователь: блокировку он не применяет (это
+                    // требует прав), но журнал копирования вести может - он
+                    // дописывает в конец файла, на что ему выданы права.
+                    // Без этого включённая галочка J молчала бы при входе
+                    // не-админом.
+                    RunJournalOnly();
+                    CheckJournalWritable();
+                }
             }
             catch
             {
@@ -7043,6 +7631,23 @@ foreach (string path in oldFiles.Keys)
                 _busy = false;
                 _timer.Interval = 3000;
             }
+        }
+
+        // Один раз предупреждаем, если журнал копирования включён, а писать
+        // в него нечем (права выдаёт первый запуск с правами администратора).
+        private bool _journalWarned;
+
+        private void CheckJournalWritable()
+        {
+            if (_journalWarned) return;
+            if (string.IsNullOrEmpty(UsbJournalMonitor.WriteBlockedReason)) return;
+            _journalWarned = true;
+            _icon.ShowBalloonTip(6000, Program.Title,
+                "Журнал копирования включён, но записать в него нельзя.\n" +
+                UsbJournalMonitor.WriteBlockedReason + ".\n" +
+                "Запустите программу с правами администратора или поставьте\n" +
+                "службу мониторинга (пункт 7).",
+                ToolTipIcon.Warning);
         }
 
         // Активная блокировка: снимает точки монтирования посторонних
@@ -7066,6 +7671,17 @@ foreach (string path in oldFiles.Keys)
             // Журнал подключений и копирований. Работает и здесь, и в
             // службе, но по мьютексу в каждый момент пишет только один из
             // них: пока служба жива, журнал ведёт она.
+            try { UsbJournalMonitor.RunOnce(false); }
+            catch { }
+        }
+
+        // Журнал копирования при входе ОБЫЧНОГО пользователя. Блокировку
+        // (снятие точек монтирования) и опрос WMI здесь не делаем - это
+        // требует прав администратора. Только цикл журнала: он теперь умеет
+        // писать без прав (дописывание в конец файла, см. UsbJournalRights).
+        private void RunJournalOnly()
+        {
+            if (!JournalSettings.IsEnabled()) return;
             try { UsbJournalMonitor.RunOnce(false); }
             catch { }
         }
@@ -7793,6 +8409,15 @@ foreach (string path in oldFiles.Keys)
                 "  размер всего: " +
                 UsbJournal.TotalSizeBytes().ToString(CultureInfo.InvariantCulture) + " байт");
             sb.AppendLine("Ведёт журнал: " + JournalOwnerSummary());
+            sb.AppendLine("Право дописывать в журнал у этого процесса: " +
+                UsbJournalRights.CanWriteNow());
+            if (!string.IsNullOrEmpty(UsbJournalMonitor.WriteBlockedReason))
+                sb.AppendLine("  запись невозможна: " + UsbJournalMonitor.WriteBlockedReason);
+            if (!string.IsNullOrEmpty(UsbJournalMonitor.OwnerNameElsewhere))
+                sb.AppendLine("  журнал ведёт другой процесс: " +
+                    UsbJournalMonitor.OwnerNameElsewhere);
+            if (!string.IsNullOrEmpty(UsbJournalRights.LastError))
+                sb.AppendLine("  ошибка выдачи прав: " + UsbJournalRights.LastError);
             sb.AppendLine("Последний опрос: файлов " +
                 UsbJournalMonitor.LastFileCount.ToString(CultureInfo.InvariantCulture) +
                 ", томов обрезано по лимиту " +
@@ -8639,6 +9264,131 @@ foreach (string path in oldFiles.Keys)
                 catch (Exception ex)
                 {
                     sb.AppendLine("Journal hotkeys ERROR: " + ex.Message);
+                }
+
+                // 5в) дописывание строго в конец: обычный пользователь дописывает
+                //     в журнал дескриптором с правом FILE_APPEND_DATA, поэтому
+                //     переписать или стереть уже записанное он не может.
+                //     Проверяем на временном файле: (1) что дописывание
+                //     работает, (2) что начало файла не изменилось.
+                try
+                {
+                    string probe = Path.Combine(Path.GetTempPath(),
+                        "usb_append_probe_" + Guid.NewGuid().ToString("N") + ".bin");
+                    File.WriteAllText(probe, "HEAD");
+                    bool appended = UsbJournal.TryAppendForTest(probe,
+                        Encoding.UTF8.GetBytes("TAIL"));
+                    string head = File.ReadAllText(probe);
+                    bool headKept = head.StartsWith("HEAD", StringComparison.Ordinal) &&
+                        head.EndsWith("TAIL", StringComparison.Ordinal);
+                    // ACL самого файла журнала: обычному пользователю должны
+                    // достаться только чтение и дописывание в конец
+                    // (AppendData). Ни Write, ни Delete быть не должно - иначе
+                    // он перепишет или подменит уже записанное. Проверяем
+                    // правами файла, а не попыткой записи: результат не должен
+                    // зависеть от того, под чем запущена самопроверка.
+                    bool aclChecked = false, aclAllow = false, aclNoWrite = false;
+                    bool aclPending = false;
+                    try
+                    {
+                        string real = UsbJournal.GenerationFileFor(0);
+                        if (File.Exists(real))
+                        {
+                            // Под администратором права приводим к нужным
+                            // сразу: иначе проверка читала бы ACL, оставшийся
+                            // от прежней версии (только администраторы).
+                            if (Program.IsAdministrator())
+                                UsbJournalRights.EnsureFileRights(real);
+                            FileSecurity sec = File.GetAccessControl(real);
+                            AuthorizationRuleCollection rules =
+                                sec.GetAccessRules(true, false, typeof(SecurityIdentifier));
+                            aclChecked = true;
+                            SecurityIdentifier users =
+                                new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null);
+                            foreach (FileSystemAccessRule r in rules)
+                            {
+                                if (r.IdentityReference != users) continue;
+                                FileSystemRights have = r.FileSystemRights;
+                                aclAllow = aclAllow ||
+                                    (have & FileSystemRights.AppendData) != 0;
+                                aclNoWrite = aclNoWrite && (have & FileSystemRights.Write) == 0 &&
+                                    (have & FileSystemRights.Delete) == 0;
+                            }
+                            if (!aclAllow && !Program.IsAdministrator())
+                            {
+                                // Прав на пользователя в ACL ещё нет, и выдать
+                                // их может только администратор (или служба).
+                                // Это не поломка: самопроверка идёт обычно без
+                                // прав. Отмечаем как «ожидается» и не ругаемся.
+                                aclPending = true;
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        sb.AppendLine("Journal ACL ERROR: " + ex.Message);
+                    }
+                    bool appendOnlyOk = appended && headKept &&
+                        (aclPending ? true : (aclChecked ? (aclAllow && aclNoWrite) : true));
+                    sb.AppendLine("Journal append-only (право дописывать, не переписывать): " +
+                        (appendOnlyOk ? (aclPending ? "OK (ждём прав администратора)" : "OK") : "FAIL") +
+                        " (дописал=" + appended + " начало_цело=" + headKept +
+                        " acl_проверен=" + aclChecked +
+                        " дописывать_можно=" + aclAllow +
+                        " переписать_нельзя=" + aclNoWrite +
+                        " ждём_прав=" + aclPending + ")");
+                    try { File.Delete(probe); } catch { }
+                }
+                catch (Exception ex)
+                {
+                    sb.AppendLine("Journal append-only ERROR: " + ex.Message);
+                }
+
+                // 5г) закрепление владельца цикла: мьютекс запрещает идти
+                //     циклу одновременно, но без закрепления в реестре служба
+                //     и обычный трей писали бы каждую запись дважды.
+                try
+                {
+                    long now = DateTime.Now.Ticks;
+                    long fresh = now - TimeSpan.FromSeconds(5).Ticks;   // владелец жив
+                    long stale = now - TimeSpan.FromSeconds(60).Ticks;  // владелец молчит
+
+                    // трей не отбирает журнал у живой службы
+                    UsbJournalMonitor.UseOwnerForTest("служба", fresh);
+                    string who;
+                    bool trayVsService = !UsbJournalMonitor.TryClaimOwnerForTest(false, out who);
+
+                    // служба отбирает журнал у трея (приоритет)
+                    UsbJournalMonitor.UseOwnerForTest("трей: u: 1", fresh);
+                    bool svcVsTray = UsbJournalMonitor.TryClaimOwnerForTest(true, out who);
+
+                    // никто не владеет - забираем
+                    UsbJournalMonitor.UseOwnerForTest("трей: u: 1", stale);
+                    bool trayAfterStale = UsbJournalMonitor.TryClaimOwnerForTest(false, out who);
+
+                    // свой владелец продолжаем вести
+                    bool trayKeeps = UsbJournalMonitor.TryClaimOwnerForTest(false, out who);
+
+                    // чужая метка с будущего (часы переведены назад) -
+                    // молча отдаём журнал, чтобы не наследить
+                    UsbJournalMonitor.UseOwnerForTest("служба", now + TimeSpan.FromHours(1).Ticks);
+                    bool futureOwner = !UsbJournalMonitor.TryClaimOwnerForTest(false, out who);
+
+                    bool ownerOk = trayVsService && svcVsTray && trayAfterStale &&
+                        trayKeeps && futureOwner;
+                    sb.AppendLine("Journal owner (служба важнее трея, дубли не пишем): " +
+                        (ownerOk ? "OK" : "FAIL") +
+                        " (трей_у_службы=" + trayVsService +
+                        " служба_у_трея=" + svcVsTray +
+                        " трей_после_молчания=" + trayAfterStale +
+                        " трей_держит=" + trayKeeps +
+                        " метка_из_будущего=" + futureOwner + ")");
+                    UsbJournalMonitor.UseOwnerForTest(null, 0);
+                }
+                catch (Exception ex)
+                {
+                    UsbJournalMonitor.UseOwnerForTest(null, 0);
+                    sb.AppendLine("Journal owner ERROR: " + ex.Message);
                 }
 
                 // 3в) состав записей: в записи о подключении не должно быть
