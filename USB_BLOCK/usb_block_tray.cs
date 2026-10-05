@@ -2476,10 +2476,10 @@ namespace UsbBlockTray
     // Записи только дописываются, поэтому файл можно открыть на Append и
     // не перешивать всё заново (важно: шифрование каждой записи стоит
     // дорого, перешивать весь журнал на каждом цикле нельзя).
-    // Переполнение: RecordsPerFile записей -> сдвиг поколений
+    // Переполнение: MaxRecordsPerFile записей -> сдвиг поколений
     // (journal.dat -> journal_1.dat -> ... -> journal_9.dat), старый
     // удаляется. Читается сначала текущий файл, потом поколения по
-    // убыванию свежести.
+    // убыванию свежести. Итого 10 файлов по 5000 записей.
     // =====================================================================
     public static class UsbJournal
     {
@@ -2487,7 +2487,7 @@ namespace UsbBlockTray
 
         // Записей в текущем файле до ротации. Внутреннее поле - только чтобы
         // самопроверка могла проверить ротацию на маленьком значении.
-        internal static int MaxRecordsPerFile = 10000;
+        internal static int MaxRecordsPerFile = 5000;
 
         // Соль DPAPI. Как и у whitelist.dat, шифрование не мешает админу
         // прочитать журнал - защиту от обычного пользователя даёт ACL.
@@ -2858,6 +2858,88 @@ namespace UsbBlockTray
     //   целиком: иначе недосканированные файлы выглядели бы удалёнными.
     //   Такой цикл пропускается, факт попадает в --diag.
     // =====================================================================
+    // =====================================================================
+    // ВЕДЕНИЕ ЖУРНАЛА - ВКЛЮЧАЕТСЯ ПО ЖЕЛАНИЮ (пункт J в меню трея)
+    // Обход томов накопителей на каждом цикле (раз в пару секунд) -
+    // заметная работа, а журнал нужен не всегда. Поэтому он по умолчанию
+    // ВЫКЛЮЧЕН, и включается администратором осознанно. Настройка
+    // машино-широкая (HKLM), чтобы служба под SYSTEM и трей решали
+    // одинаково; выключение действует сразу - проверка идёт на каждом
+    // цикле, а не только при старте.
+    // =====================================================================
+    public static class JournalSettings
+    {
+        private const string ValueKey = @"SOFTWARE\USB_Block";
+        private const string ValueName = "JournalEnabled";
+
+        public static string LastError;
+
+        // Подмена значения только на время самопроверки: обычный
+        // пользователь не может писать в HKLM.
+        private static bool? _testOverride;
+
+        public static void UseEnabledForTest(bool? enabled)
+        {
+            _testOverride = enabled;
+        }
+
+        // Нет значения в реестре - журнал не ведётся.
+        public static bool IsEnabled()
+        {
+            if (_testOverride.HasValue) return _testOverride.Value;
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(ValueKey, false))
+                {
+                    if (k == null) return false;
+                    object v = k.GetValue(ValueName);
+                    if (v == null) return false;
+                    if (v is int) return ((int)v) != 0;
+                    string s = v as string;
+                    if (s != null)
+                        return s == "1" ||
+                            string.Equals(s, "true", StringComparison.OrdinalIgnoreCase);
+                    return false;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static bool SetEnabled(bool enabled)
+        {
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.CreateSubKey(ValueKey))
+                    k.SetValue(ValueName, enabled ? 1 : 0, RegistryValueKind.DWord);
+                LastError = null;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LastError = ex.Message;
+                return false;
+            }
+        }
+
+        // Настройка снимается при удалении программы.
+        public static void Clear()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(ValueKey, true))
+                {
+                    if (k != null) k.DeleteValue(ValueName, false);
+                }
+            }
+            catch
+            {
+            }
+        }
+    }
+
     public static class UsbJournalMonitor
     {
         private const string CycleMutexName = @"Global\UsbBlockJournal_Cycle_v1";
@@ -2916,6 +2998,14 @@ namespace UsbBlockTray
         // только один из них (мьютекс), второй выходит сразу.
         public static void RunOnce(bool byService)
         {
+            // Журнал ведётся только когда его включили (пункт J в меню
+            // трея). Проверка ДО мьютекса и обхода томов: выключенный
+            // журнал не должен стоить ни одного лишнего запроса.
+            if (!JournalSettings.IsEnabled())
+            {
+                lock (Sync) { _owner = string.Empty; }
+                return;
+            }
             lock (Sync)
             {
                 Mutex mtx = Acquire();
@@ -3006,13 +3096,17 @@ namespace UsbBlockTray
             }
             finally
             {
-if (_present == null) _present = LoadPresence();
-            // Предыдущее состояние для сравнения: сразу заполняем его
-            // тем, что лежит в реестре, иначе первый же цикл после запуска
-            // переписал бы реестр впустую.
-            if (_prev == null)
-                _prev = new Dictionary<string, string>(_present,
-                    StringComparer.OrdinalIgnoreCase);
+                // Состояние наблюдения восстанавливаем даже после сбоя цикла:
+                // иначе первый же неудачный WMI-запрос обнулил бы его, а
+                // следующий цикл записал бы ложные "отключено" для всех
+                // накопителей.
+                if (_present == null) _present = LoadPresence();
+                // Предыдущее состояние для сравнения: сразу заполняем его
+                // тем, что лежит в реестре, иначе первый же цикл после запуска
+                // переписал бы реестр впустую.
+                if (_prev == null)
+                    _prev = new Dictionary<string, string>(_present,
+                        StringComparer.OrdinalIgnoreCase);
                 SaveLastCycle(nowLocal);
                 _lastCycleLocal = nowLocal;
                 _primed = true;
@@ -3812,6 +3906,9 @@ foreach (string path in oldFiles.Keys)
 
         // "Ctrl+Alt+U" -> модификаторы и виртуальная клавиша.
         // Возвращает false, если строка разобрать нельзя.
+        // "Win" здесь только для совместимости: окно назначения клавиши его
+        // больше не создаёт (см. HotkeyCaptureForm.Accept), но сочетание,
+        // сохранённое старой версией или вписанное руками, разобрать надо.
         public static bool TryParse(string text, out uint modifiers, out uint vk)
         {
             modifiers = 0;
@@ -4028,8 +4125,8 @@ foreach (string path in oldFiles.Keys)
         {
             _capturing = true;
             _box.Text = "нажмите клавиши...";
-            _hint.Text = "Нужно основное поле и хотя бы один из Ctrl, Alt, Shift, Win. " +
-                "Esc - отмена захвата.";
+            _hint.Text = "Нужно основное поле и хотя бы один из Ctrl, Alt, Shift. " +
+                "Клавиша Win не используется. Esc - отмена захвата.";
             _capture.Enabled = false;
             _box.Focus();
         }
@@ -4046,9 +4143,26 @@ foreach (string path in oldFiles.Keys)
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
-        private void Accept(Message msg, Keys keyData)
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern short GetKeyState(int vKey);
+
+        // Нажата ли клавиша Win (VK_LWIN/VK_RWIN). Старший бит GetKeyState
+        // означает «нажата в этот момент», младший - «была нажата».
+        private static bool WinHeld()
         {
-            if (keyData == Keys.Escape)
+            try
+            {
+                return (GetKeyState(0x5B) & 0x8000) != 0 ||
+                       (GetKeyState(0x5C) & 0x8000) != 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void Accept(Message msg, Keys keyData)
+        {            if (keyData == Keys.Escape)
             {
                 _capturing = false;
                 _capture.Enabled = true;
@@ -4058,11 +4172,26 @@ foreach (string path in oldFiles.Keys)
 
             Keys code = keyData & Keys.KeyCode;
             uint mods = 0;
-            if ((keyData & Keys.Control) != 0) mods |= HotkeyStore.ModControl;
-            if ((keyData & Keys.Alt) != 0) mods |= HotkeyStore.ModAlt;
-            if ((keyData & Keys.Shift) != 0) mods |= HotkeyStore.ModShift;
-            if ((keyData & Keys.LWin) != 0 || (keyData & Keys.RWin) != 0)
-                mods |= HotkeyStore.ModWin;
+            // Модификаторы берём из ФИЗИЧЕСКОГО состояния клавиш
+            // (ModifierKeys), а не из битов keyData. В System.Windows.Forms
+            // у Win нет отдельного бита-модификатора, а Checks Win делали
+            // по кодам клавиш LWin/RWin (0x5B/0x5C) - и это срабатывало
+            // само: у X, C, V, Z, W и других кодов биты совпадают с
+            // 0x5B/0x5C, поэтому в сочетание сам дорисовывался Win.
+            Keys held = ModifierKeys;
+            if ((held & Keys.Control) == Keys.Control) mods |= HotkeyStore.ModControl;
+            if ((held & Keys.Alt) == Keys.Alt) mods |= HotkeyStore.ModAlt;
+            if ((held & Keys.Shift) == Keys.Shift) mods |= HotkeyStore.ModShift;
+            // Win для журнала не используется: сочетания с Win перехватывает
+            // сама Windows (меню «Пуск»), и Win в поле означал бы клавишу,
+            // которая работает не везде. В Keys у Win нет бита-модификатора,
+            // поэтому состояние самих клавиш спрашиваем напрямую.
+            if (WinHeld())
+            {
+                _hint.Text = "Клавиша Win в сочетании для журнала не используется - " +
+                    "отпустите её и наберите сочетание снова.";
+                return;
+            }
 
             bool bareModifier = HotkeyStore.IsModifierKey(code);
             if (bareModifier)
@@ -4072,15 +4201,15 @@ foreach (string path in oldFiles.Keys)
             }
             if (mods == 0)
             {
-                _hint.Text = "Нужен хотя бы один из Ctrl, Alt, Shift, Win - иначе " +
+                _hint.Text = "Нужен хотя бы один из Ctrl, Alt, Shift - иначе " +
                     "сочетание будет перехватывать обычный набор текста.";
                 return;
             }
             if (!Enum.IsDefined(typeof(Keys), code) ||
                 !HotkeyStore.IsMainKey(code, unchecked((uint)code)))
             {
-                _hint.Text = "Эта клавиша не подходит как основная (Ctrl, Alt, " +
-                    "Shift и Win задаются как добавка). Выберите обычную клавишу.";
+                _hint.Text = "Эта клавиша не подходит как основная (Ctrl, Alt " +
+                    "и Shift задаются как добавка). Выберите обычную клавишу.";
                 return;
             }
 
@@ -4836,7 +4965,10 @@ foreach (string path in oldFiles.Keys)
                 SetText(_notes, notes);
 
                 long bytes = UsbJournal.TotalSizeBytes();
-                _status.Text = "Записей в файлах журнала: " +
+                _status.Text =
+                    (JournalSettings.IsEnabled() ? string.Empty : "ВЕДЕНИЕ ЖУРНАЛА ВЫКЛЮЧЕНО " +
+                        "(меню трея, пункт J) - показаны ранее записанные записи.   ") +
+                    "Записей в файлах журнала: " +
                     UsbJournal.TotalRecordCount().ToString(CultureInfo.InvariantCulture) +
                     "   Размер: " + bytes.ToString(CultureInfo.InvariantCulture) + " байт" +
                     "   Показано: устройств " + shownDev.ToString(CultureInfo.InvariantCulture) +
@@ -5198,6 +5330,7 @@ foreach (string path in oldFiles.Keys)
         private ToolStripMenuItem _miStatus;
         private ToolStripMenuItem _miSvcInstall;
         private ToolStripMenuItem _miSvcRemove;
+        private ToolStripMenuItem _miJournal;
         private HiddenWindow _hwnd;
         private System.Windows.Forms.Timer _timer;
 
@@ -5333,6 +5466,10 @@ foreach (string path in oldFiles.Keys)
             mView.Click += delegate { DoViewWhitelist(); };
             _menu.Items.Add(mView);
 
+            _miJournal = new ToolStripMenuItem("J Вести журнал подключений и копирований");
+            _miJournal.Click += delegate { DoToggleJournal(); };
+            _menu.Items.Add(_miJournal);
+
             _menu.Items.Add(new ToolStripSeparator());
 
             _miSvcInstall = new ToolStripMenuItem("7 Установить службу мониторинга");
@@ -5363,6 +5500,7 @@ foreach (string path in oldFiles.Keys)
 
             _icon.ContextMenuStrip = _menu;
             RefreshServiceMenu();
+            RefreshJournalMenu();
         }
 
         private void RefreshServiceMenu()
@@ -5372,6 +5510,18 @@ foreach (string path in oldFiles.Keys)
                 _miSvcInstall.Enabled = !installed;
             if (_miSvcRemove != null)
                 _miSvcRemove.Enabled = installed;
+        }
+
+        // Пункт J показывает текущее состояние и обновляется после
+        // переключения (CheckOnClick не используем: если запись настройки
+        // не удалась, галочка врёт).
+        private void RefreshJournalMenu()
+        {
+            if (_miJournal == null) return;
+            bool on = JournalSettings.IsEnabled();
+            _miJournal.Checked = on;
+            _miJournal.Text = "J Вести журнал подключений и копирований " +
+                (on ? "(ВКЛ)" : "(выключено)");
         }
 
         private void RefreshStatus()
@@ -5987,6 +6137,39 @@ foreach (string path in oldFiles.Keys)
         }
 
         // =============================================================
+        // Пункт J. Ведение журнала подключений и копирований
+        // По умолчанию выключено: включается только по желанию
+        // администратора. Пароль не спрашивается - запись в журнал не
+        // меняет доступ к накопителям, а включает её администратор
+        // машины (окно просмотра журнала всё равно закрыто ACL).
+        // =============================================================
+        private void DoToggleJournal()
+        {
+            if (!EnsureAdmin()) return;
+            bool want = !JournalSettings.IsEnabled();
+            if (!JournalSettings.SetEnabled(want))
+            {
+                MessageBox.Show("Не удалось изменить настройку журнала:\n" +
+                        (JournalSettings.LastError ?? "нет прав на запись в реестр"),
+                    Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                RefreshJournalMenu();
+                return;
+            }
+            RefreshJournalMenu();
+            _icon.ShowBalloonTip(3000, Program.Title,
+                want
+                    ? "Журнал подключений и копирований ВКЛЮЧЁН.\n" +
+                      "Записываются: подключения и отключения накопителей,\n" +
+                      "а также скопированные, изменённые и удалённые файлы\n" +
+                      "(без содержимого файлов и без имени пользователя).\n" +
+                      "Хранится 10 файлов по 5000 записей."
+                    : "Журнал подключений и копирований ВЫКЛЮЧЕН.\n" +
+                      "Новые записи не пишутся, уже накопленные остаются -\n" +
+                      "их можно открыть горячей клавишей журнала.",
+                ToolTipIcon.Info);
+        }
+
+        // =============================================================
         // Пункт 7. Установить службу мониторинга
         // =============================================================
         private void DoInstallService()
@@ -6180,7 +6363,7 @@ foreach (string path in oldFiles.Keys)
                 TryDeleteDir(StorePaths.Directory);
             }
 
-            // 4б) состояние наблюдения и горячая клавиша журнала
+            // 4б) состояние наблюдения, горячая клавиша и включение журнала
             try
             {
                 Registry.LocalMachine.DeleteSubKeyTree(
@@ -6190,6 +6373,7 @@ foreach (string path in oldFiles.Keys)
             {
             }
             HotkeyStore.Clear();
+            JournalSettings.Clear();
 
             // 5) защищённая копия (Program Files\USB_Block)
             string running = Application.ExecutablePath;
@@ -7278,6 +7462,14 @@ foreach (string path in oldFiles.Keys)
 
             sb.AppendLine();
             sb.AppendLine("--- Журнал подключений и копирований ---");
+            sb.AppendLine("Ведение журнала: " +
+                (JournalSettings.IsEnabled()
+                    ? "ВКЛЮЧЕНО (пункт J в меню трея)"
+                    : "ВЫКЛЮЧЕНО (пункт J в меню трея) - записи не пишутся"));
+            sb.AppendLine("Размер кольца журнала: " +
+                (StorePaths.JournalGenerations + 1).ToString(CultureInfo.InvariantCulture) +
+                " файлов по " + UsbJournal.MaxRecordsPerFile.ToString(CultureInfo.InvariantCulture) +
+                " записей");
             sb.AppendLine("Файл: " + StorePaths.JournalFile +
                 "  существует=" + File.Exists(StorePaths.JournalFile));
             sb.AppendLine("Поколений: " + (StorePaths.JournalGenerations + 1) +
@@ -7399,6 +7591,15 @@ foreach (string path in oldFiles.Keys)
         private static string JournalOwnerSummary()
         {
             if (UsbJournalMonitor.IsOwner) return UsbJournalMonitor.OwnerName;
+            if (!JournalSettings.IsEnabled())
+                return "журнал выключен (пункт J в меню трея)";
+            // Метка последнего цикла надёжнее поиска процесса: командную
+            // строку процесса с повышенными правами обычный пользователь
+            // через WMI не видит (CommandLine приходит пустым), и живой
+            // трей выглядел бы в диагностике как незапущенный.
+            string age = JournalCycleAge();
+            if (age != null)
+                return "цикл наблюдения обновляется, последний " + age + " (трей или служба)";
             try
             {
                 if (ServiceManager.IsInstalled())
@@ -7419,6 +7620,34 @@ foreach (string path in oldFiles.Keys)
             if (TrayRunning()) return "трей (текущий пользователь)";
             return "НЕ ВЕДЁТ НИКТО: служба не установлена и трей не запущен - " +
                 "журнал пополняться не будет";
+        }
+
+        // Насколько давно был цикл наблюдения (его пишет тот, кто ведёт
+        // журнал). null - метки нет ни разу: журнал не включали.
+        private static string JournalCycleAge()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(
+                    @"SOFTWARE\USB_Block\JournalPresence", false))
+                {
+                    if (k == null) return null;
+                    object v = k.GetValue("LastCycleTicks");
+                    if (v == null) return null;
+                    long ticks = Convert.ToInt64(v, CultureInfo.InvariantCulture);
+                    if (ticks <= 0) return null;
+                    double s = (DateTime.Now - new DateTime(ticks)).TotalSeconds;
+                    if (s < 0) return "только что";
+                    if (s < 90) return ((int)s).ToString(CultureInfo.InvariantCulture) + " с назад";
+                    if (s < 5400)
+                        return ((int)(s / 60)).ToString(CultureInfo.InvariantCulture) + " мин назад";
+                    return ((int)(s / 3600)).ToString(CultureInfo.InvariantCulture) + " ч назад";
+                }
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         // Комбинация журнала для --diag: сохранённая и разобранная по частям,
@@ -8000,6 +8229,28 @@ foreach (string path in oldFiles.Keys)
                     sb.AppendLine("Journal multi-partition key ERROR: " + ex.Message);
                 }
 
+                // 5) ведение журнала включается по желанию: выключенный
+                //    журнал не должен запускать даже цикл наблюдения
+                try
+                {
+                    JournalSettings.UseEnabledForTest(false);
+                    bool off = !JournalSettings.IsEnabled();
+                    UsbJournalMonitor.RunOnce(false);      // не должен начать цикл
+                    bool noOwner = !UsbJournalMonitor.IsOwner;
+                    JournalSettings.UseEnabledForTest(true);
+                    bool on = JournalSettings.IsEnabled();
+                    JournalSettings.UseEnabledForTest(null);
+                    bool switchOk = off && on && noOwner;
+                    sb.AppendLine("Journal switch (off by default): " +
+                        (switchOk ? "OK" : "FAIL") +
+                        " (выкл=" + off + " вкл=" + on + " без_цикла=" + noOwner + ")");
+                }
+                catch (Exception ex)
+                {
+                    JournalSettings.UseEnabledForTest(null);
+                    sb.AppendLine("Journal switch ERROR: " + ex.Message);
+                }
+
                 // 4) горячая клавиша: разбор и форматирование
                 try
                 {
@@ -8015,12 +8266,20 @@ foreach (string path in oldFiles.Keys)
                     bool bareMod = !HotkeyStore.TryParse("Ctrl+Shift", out m2, out v2);
                     bool badName = !HotkeyStore.TryParse("Ctrl+НетТакой", out m2, out v2);
                     bool empty = !HotkeyStore.TryParse("", out m2, out v2);
+                    // Win в новых комбинациях не появляется (окно назначения
+                    // его не добавляет), но сохранённое ранее значение
+                    // "Win+..." разобрать надо - иначе вышло бы "комбинация
+                    // не распознаётся" у работающей машины.
+                    uint m3, v3;
+                    bool winLegacy = HotkeyStore.TryParse("Win+Ctrl+U", out m3, out v3) &&
+                        (m3 & HotkeyStore.ModWin) != 0 && v3 == (uint)Keys.U;
                     bool keyOk = parseMain && parseMods && parseVk && format &&
-                        noMod && bareMod && badName && empty;
+                        noMod && bareMod && badName && empty && winLegacy;
                     sb.AppendLine("Hotkey parse: " + (keyOk ? "OK" : "FAIL") +
                         " (mods=" + parseMods + " vk=" + parseVk + " fmt=" + format +
                         " без_мод=" + noMod + " мод_как_клавиша=" + bareMod +
-                        " плохое_имя=" + badName + " пусто=" + empty + ")");
+                        " плохое_имя=" + badName + " пусто=" + empty +
+                        " win_из_старого=" + winLegacy + ")");
                 }
                 catch (Exception ex)
                 {
@@ -8059,4 +8318,4 @@ foreach (string path in oldFiles.Keys)
             return true;
         }
     }
-}
+}
