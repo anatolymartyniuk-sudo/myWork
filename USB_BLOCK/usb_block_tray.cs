@@ -18,6 +18,12 @@ using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
+// Версия программы. Та же цифра стоит и в app.manifest (assemblyIdentity):
+// при каждой сборке обновляются ОБЕ, иначе в свойствах файла и в манифесте
+// разойдутся. Проверка - в самопроверке ("Build version").
+[assembly: AssemblyVersion("1.78.0.0")]
+[assembly: AssemblyFileVersion("1.78.0.0")]
+
 namespace UsbBlockTray
 {
     internal static class Program
@@ -521,23 +527,28 @@ namespace UsbBlockTray
         // (DPAPI LocalMachine, UsbJournal), файл закрыт ACL. В файле журнала
         // видны только имена накопителей и пути скопированных файлов, но не
         // содержимое самих файлов.
+        //
+        // Журналов ДВА, у каждого своё кольцо поколений (см. UsbJournal):
+        //   - journal.dat: подключения и служебные строки;
+        //   - journal_files.dat: записи о копировании.
+        // Разделение нужно, чтобы копирование тысяч файлов не вытесняло
+        // записи о подключении накопителя из кольца.
         public static string JournalFile
         {
             get { return Path.Combine(Directory, "journal.dat"); }
         }
 
-        // Текущее поколение журнала (текущий файл) и предыдущие:
-        // journal.dat (текущий), journal_1.dat ... journal_9.dat (старые).
-        // При переполнении текущего файла поколения сдвигаются, самый старый
-        // удаляется - журнал живёт кольцом, размер ограничен.
-        public static int JournalGenerations = 9;
-
-        public static string JournalGenerationFile(int generation)
+        public static string JournalFilesFile
         {
-            if (generation <= 0) return JournalFile;
-            return Path.Combine(Directory, "journal_" +
-                generation.ToString(CultureInfo.InvariantCulture) + ".dat");
+            get { return Path.Combine(Directory, "journal_files.dat"); }
         }
+
+        // Текущее поколение журнала (текущий файл) и предыдущие:
+        // journal.dat (текущий), journal_1.dat ... journal_9.dat (старые);
+        // у журнала копирования та же схема с именем journal_files*.
+        // При переполнении текущего файла поколения сдвигаются, самый старый
+        // удаляется - каждый журнал живёт кольцом, размер ограничен.
+        public static int JournalGenerations = 9;
     }
 
     // =====================================================================
@@ -683,7 +694,8 @@ namespace UsbBlockTray
     // файлы закрыты ACL от записи.
     //
     // Что разрешено обычному пользователю:
-    //   - journal.dat и journal_1..9: ПРОЧИТАТЬ и ДОПИСЫВАТЬ В КОНЕЦ.
+    //   - journal.dat, journal_1..9, journal_files.dat, journal_files_1..9:
+    //     ПРОЧИТАТЬ и ДОПИСЫВАТЬ В КОНЕЦ (оба журнала - одинаково).
     //     Дописывание идёт дескриптором с правом FILE_APPEND_DATA, поэтому
     //     изменить или стереть уже записанное нельзя: для этого нужно
     //     удалить файл, а это право осталось у администратора;
@@ -741,40 +753,55 @@ namespace UsbBlockTray
 
         // Проходит по всем поколениям журнала и чинит права (у файлов,
         // созданных прошлой версией, обычного пользователя не было).
+        // Обязаны пройти оба журнала: и подключения, и копирование.
         public static void EnsureAllFileRights()
         {
-            for (int g = 0; g <= StorePaths.JournalGenerations; g++)
+            for (int stream = 0; stream <= UsbJournal.StreamFiles; stream++)
             {
-                try { EnsureFileRights(UsbJournal.GenerationFileFor(g)); }
-                catch { }
+                for (int g = 0; g <= StorePaths.JournalGenerations; g++)
+                {
+                    try { EnsureFileRights(UsbJournal.GenerationFileFor(stream, g)); }
+                    catch { }
+                }
             }
         }
 
         // Разрешено ли текущему процессу дописывать в журнал (для --diag и
-        // для понятного сообщения в трее).
+        // для понятного сообщения в трее). Проверяются оба журнала: если
+        // есть хоть один существующий файл без права дописывания - не
+        // можем (часть журнала молчала бы).
         public static bool CanWriteNow()
         {
-            string path = UsbJournal.GenerationFileFor(0);
-            try
+            bool anyExists = false;
+            for (int stream = 0; stream <= UsbJournal.StreamFiles; stream++)
             {
-                if (!File.Exists(path)) return Program.IsAdministrator();
-                FileSecurity fs = File.GetAccessControl(path);
-                FileSystemAccessRule rule = new FileSystemAccessRule(AuthenticatedUsers,
-                    FileSystemRights.AppendData, InheritanceFlags.None, PropagationFlags.None,
-                    AccessControlType.Allow);
-                foreach (FileSystemAccessRule have in
-                    fs.GetAccessRules(true, false, typeof(SecurityIdentifier)))
+                string path = UsbJournal.GenerationFileFor(stream, 0);
+                try
                 {
-                    if (have.IdentityReference == AuthenticatedUsers &&
-                        (have.FileSystemRights & FileSystemRights.AppendData) != 0)
-                        return true;
+                    if (!File.Exists(path)) continue;
+                    anyExists = true;
+                    FileSecurity fs = File.GetAccessControl(path);
+                    bool can = false;
+                    foreach (FileSystemAccessRule have in
+                        fs.GetAccessRules(true, false, typeof(SecurityIdentifier)))
+                    {
+                        if (have.IdentityReference == AuthenticatedUsers &&
+                            (have.FileSystemRights & FileSystemRights.AppendData) != 0)
+                        {
+                            can = true;
+                            break;
+                        }
+                    }
+                    if (!can) return false;
                 }
-                return false;
+                catch
+                {
+                    return false;
+                }
             }
-            catch
-            {
-                return false;
-            }
+            // Файлов ещё нет - дописывать пока некуда: это делает только
+            // администратор при первом запуске.
+            return anyExists || Program.IsAdministrator();
         }
 
         // ---- Состояние наблюдения в реестре ----
@@ -1317,6 +1344,7 @@ namespace UsbBlockTray
         public string UsbId;        // USB\VID_xxxx&PID_xxxx
         public string Serial;
         public string Model;
+        public string PartitionId;  // "Disk #2, Partition #0" (WMI)
     }
 
     public static class Exec
@@ -1846,7 +1874,8 @@ namespace UsbBlockTray
                             DiskId = sd.DiskDeviceId,
                             UsbId = sd.UsbId,
                             Serial = sd.Serial,
-                            Model = sd.Model
+                            Model = sd.Model,
+                            PartitionId = partDevId
                         });
                     }
                 }
@@ -2680,8 +2709,18 @@ namespace UsbBlockTray
 
     // =====================================================================
     // ЖУРНАЛ подключений накопителей и копируемых на них файлов.
-    // Файл journal.dat лежит РЯДОМ с whitelist.dat (C:\ProgramData\USB_Block)
-    // и закрыт от обычного пользователя ДВОЯКО:
+    // Два НЕЗАВИСИМЫХ журнала в одной папке РЯДОМ с whitelist.dat
+    // (C:\ProgramData\USB_Block), у каждого своё кольцо поколений:
+    //   - journal.dat -> journal_1.dat ... journal_9.dat:
+    //     записи о подключениях/отключениях (DEV+, DEV-, DEV=) и
+    //     служебные строки (SYS);
+    //   - journal_files.dat -> journal_files_1.dat ... journal_files_9.dat:
+    //     записи о копировании (FILE+, FILE~, FILE-, FILE>).
+    // Разведение сделано намеренно: копирование тысяч файлов за минуту
+    // иначе вытесняло бы (и вытесняло) записи о подключении накопителя
+    // из общего кольца - они пропадали из журнала. Теперь файловый поток
+    // физически не может удалить запись о подключении, и наоборот.
+    // Оба файла закрыты от обычного пользователя ДВОЯКО:
     //   1) каждая запись зашифрована (DPAPI LocalMachine, своя соль);
     //   2) на файл и на папку выставлен ACL (Администраторы + SYSTEM),
     //      тот же приём, что на whitelist.dat.
@@ -2696,8 +2735,10 @@ namespace UsbBlockTray
     // дорого, перешивать весь журнал на каждом цикле нельзя).
     // Переполнение: MaxRecordsPerFile записей -> сдвиг поколений
     // (journal.dat -> journal_1.dat -> ... -> journal_9.dat), старый
-    // удаляется. Читается сначала текущий файл, потом поколения по
-    // убыванию свежести. Итого 10 файлов по 5000 записей.
+    // удаляется; у файла копирования та же схема со своими именами.
+    // Читается сначала текущий файл, потом поколения по убыванию
+    // свежести. Итого 10 файлов по 5000 записей на каждый из двух
+    // журналов. При показе оба журнала сшиваются по времени.
     // =====================================================================
     public static class UsbJournal
     {
@@ -2835,38 +2876,67 @@ namespace UsbBlockTray
             get { return _dirOverride ?? StorePaths.Directory; }
         }
 
+        // Два журнала на одних механиках, но в разных файлах (см. заголовок
+        // класса): 0 - подключения и служебные строки, 1 - копирование.
+        internal const int StreamDevices = 0;
+        internal const int StreamFiles = 1;
+        private const int StreamCount = 2;
+        private static readonly string[] FileStem = { "journal", "journal_files" };
+
         private static string CurrentFile()
         {
-            return Path.Combine(Dir, "journal.dat");
+            return CurrentFile(StreamDevices);
         }
 
-        // Текущий файл журнала (с учётом переопределения папки в --selftest).
+        private static string CurrentFile(int stream)
+        {
+            return Path.Combine(Dir, FileStem[stream] + ".dat");
+        }
+
+        // Текущий файл журнала подключений (с учётом переопределения папки
+        // в --selftest).
         public static string CurrentPath
         {
-            get { return CurrentFile(); }
+            get { return CurrentFile(StreamDevices); }
         }
 
-        private static string GenerationFile(int generation)
+        // Текущий файла журнала копирования.
+        public static string CurrentFilesPath
         {
-            if (generation <= 0) return CurrentFile();
-            return Path.Combine(Dir, "journal_" +
+            get { return CurrentFile(StreamFiles); }
+        }
+
+        private static string GenerationFile(int stream, int generation)
+        {
+            if (generation <= 0) return CurrentFile(stream);
+            return Path.Combine(Dir, FileStem[stream] + "_" +
                 generation.ToString(CultureInfo.InvariantCulture) + ".dat");
         }
 
         // Путь файла поколения снаружи класса: им пользуется UsbJournalRights,
-        // который следит за правами на эти файлы.
+        // который следит за правами на эти файлы (нужны оба журнала).
         public static string GenerationFileFor(int generation)
         {
-            return GenerationFile(generation);
+            return GenerationFile(StreamDevices, generation);
         }
 
-        // Сколько записей в текущем файле (без расшифровки - только по
-        // заголовкам длин, поэтому дёшево).
+        public static string GenerationFileFor(int stream, int generation)
+        {
+            return GenerationFile(stream, generation);
+        }
+
+        // Сколько записей в текущих файлах (без расшифровки - только по
+        // заголовкам длин, поэтому дёшево). Сумма по обоим журналам.
         public static int CurrentRecordCount()
+        {
+            return CurrentRecordCount(StreamDevices) + CurrentRecordCount(StreamFiles);
+        }
+
+        public static int CurrentRecordCount(int stream)
         {
             try
             {
-                return CountRecords(CurrentFile());
+                return CurrentCount(stream);
             }
             catch
             {
@@ -2876,12 +2946,17 @@ namespace UsbBlockTray
 
         public static int TotalRecordCount()
         {
+            return TotalRecordCount(StreamDevices) + TotalRecordCount(StreamFiles);
+        }
+
+        public static int TotalRecordCount(int stream)
+        {
             int total = 0;
             for (int g = 0; g <= StorePaths.JournalGenerations; g++)
             {
                 try
                 {
-                    total += CountRecords(GenerationFile(g));
+                    total += CountRecords(GenerationFile(stream, g));
                 }
                 catch
                 {
@@ -2893,32 +2968,68 @@ namespace UsbBlockTray
         public static long TotalSizeBytes()
         {
             long total = 0;
-            for (int g = 0; g <= StorePaths.JournalGenerations; g++)
-            {
-                try
+            for (int stream = 0; stream < StreamCount; stream++)
+                for (int g = 0; g <= StorePaths.JournalGenerations; g++)
                 {
-                    string f = GenerationFile(g);
-                    if (File.Exists(f)) total += new FileInfo(f).Length;
+                    try
+                    {
+                        string f = GenerationFile(stream, g);
+                        if (File.Exists(f)) total += new FileInfo(f).Length;
+                    }
+                    catch
+                    {
+                    }
                 }
-                catch
-                {
-                }
-            }
             return total;
         }
 
         // Дописать одну запись. kind - вид операции (см. константы выше),
         // detail - подробности без времени и вида (вид отделён табуляцией).
+        // Куда писать - решает вид: файловые операции уходят в свой журнал.
         public static void Write(string kind, string detail)
         {
             if (string.IsNullOrEmpty(kind)) return;
             string when = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss",
                 CultureInfo.InvariantCulture);
             string text = when + "\t" + kind + "\t" + (detail ?? string.Empty);
-            WriteRaw(text);
+            WriteTo(StreamOfKind(kind), text);
         }
 
+        // Запись уже готовым текстом ("время\tвид\tподробности"): вид
+        // разбирается из строки, потому что снаружи вызывается только
+        // из записи о файле (там свой журнал).
         public static void WriteRaw(string text)
+        {
+            WriteTo(StreamOfKind(KindFromText(text)), text);
+        }
+
+        // Вид записи -> журнал: копирование не должно вытеснять записи
+        // о подключениях, поэтому у них разные файлы и разные кольца.
+        internal static int StreamOfKind(string kind)
+        {
+            return IsFileKind(kind) ? StreamFiles : StreamDevices;
+        }
+
+        internal static bool IsFileKind(string kind)
+        {
+            return kind == KindFileAdded ||
+                   kind == KindFileChanged ||
+                   kind == KindFileRemoved ||
+                   kind == KindFileRenamed;
+        }
+
+        // Вид из текста записи: "yyyy-MM-dd HH:mm:ss\tВИД\tподробности".
+        private static string KindFromText(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return string.Empty;
+            int t1 = text.IndexOf('\t');
+            if (t1 < 0) return string.Empty;
+            int t2 = text.IndexOf('\t', t1 + 1);
+            if (t2 < 0) return text.Substring(t1 + 1);
+            return text.Substring(t1 + 1, t2 - t1 - 1);
+        }
+
+        private static void WriteTo(int stream, string text)
         {
             byte[] plain = new UTF8Encoding(false).GetBytes(text);
             byte[] cipher;
@@ -2940,14 +3051,14 @@ namespace UsbBlockTray
             {
             }
 
-            string path = CurrentFile();
+            string path = CurrentFile(stream);
             try
             {
-                // Ротация - до записи: она освобождает journal.dat, и новый
+                // Ротация - до записи: она освобождает текущий файл, и новый
                 // файл надо будет и создать, и закрыть ACL заново.
                 // Не удалась - запись прекращаем (см. RotateIfFull): писать
                 // сверх MaxRecordsPerFile нельзя.
-                if (!RotateIfFull()) return;
+                if (!RotateIfFull(stream)) return;
 
                 // Заголовок формата пишется только при создании файла - на это
                 // есть права у администратора. Обычный пользователь файл не
@@ -2960,8 +3071,8 @@ namespace UsbBlockTray
                     return;
                 }
                 AppendBytes(path, BuildFrame(cipher), missing);
-                _count++;
-                _countLoaded = true;
+                _count[stream]++;
+                _countLoaded[stream] = true;
                 // Файл создан - сразу задаём права: администраторам полный
                 // доступ, обычному пользователю - чтение и дописывание в
                 // конец (переписывать записи он не может). В самопроверке
@@ -3004,35 +3115,39 @@ namespace UsbBlockTray
         // Сколько записей уже в текущем файле. Держим счётчик в памяти:
         // пересчитывать файл на КАЖДУЮ запись нельзя - при массовом
         // копировании это даёт квадратичную работу на тысячах файлов.
-        private static int _count;
-        private static bool _countLoaded;
+        private static readonly int[] _count = new int[StreamCount];
+        private static readonly bool[] _countLoaded = new bool[StreamCount];
 
-        private static int CurrentCount()
+        private static int CurrentCount(int stream)
         {
-            if (!_countLoaded)
+            if (!_countLoaded[stream])
             {
-                _count = CountRecords(CurrentFile());
-                _countLoaded = true;
+                _count[stream] = CountRecords(CurrentFile(stream));
+                _countLoaded[stream] = true;
             }
-            return _count;
+            return _count[stream];
         }
 
-        // Сброс счётчика при смене папки (самопроверка) - иначе счётчик от
+        // Сброс счётчиков при смене папки (самопроверка) - иначе счётчик от
         // прежнего журнала мешал бы определить момент ротации.
         public static void ResetCountForTest()
         {
-            _count = 0;
-            _countLoaded = false;
+            for (int stream = 0; stream < StreamCount; stream++)
+            {
+                _count[stream] = 0;
+                _countLoaded[stream] = false;
+            }
         }
 
         // Текущий файл полон - сдвигаем поколения. Удаляем самый старый,
         // затем переименовываем остальные на шаг назад и освобождаем
-        // journal.dat под текущий.
+        // текущий файл под новые записи. Ротация своя у каждого журнала:
+        // файлы копирования не двигают поколения записей о подключениях.
         // true, если ротация не понадобилась или удалась.
-        private static bool RotateIfFull()
+        private static bool RotateIfFull(int stream)
         {
-            string path = CurrentFile();
-            if (CurrentCount() < MaxRecordsPerFile) return true;
+            string path = CurrentFile(stream);
+            if (CurrentCount(stream) < MaxRecordsPerFile) return true;
             if (!Program.IsAdministrator() && !_testMode)
             {
                 // Сдвинуть поколения может только администратор: удалять и
@@ -3046,34 +3161,34 @@ namespace UsbBlockTray
                     " записей), а сдвинуть поколения может только администратор - " +
                     "запись приостановлена (запустите программу с его правами " +
                     "или поставьте службу мониторинга)";
-                _countLoaded = false;
+                _countLoaded[stream] = false;
                 return false;
             }
             try
             {
                 int last = StorePaths.JournalGenerations;
-                try { if (File.Exists(GenerationFile(last))) File.Delete(GenerationFile(last)); }
+                try { if (File.Exists(GenerationFile(stream, last))) File.Delete(GenerationFile(stream, last)); }
                 catch { }
                 for (int g = last - 1; g >= 1; g--)
                 {
-                    string from = GenerationFile(g);
+                    string from = GenerationFile(stream, g);
                     if (!File.Exists(from)) continue;
-                    string to = GenerationFile(g + 1);
+                    string to = GenerationFile(stream, g + 1);
                     try { File.Delete(to); } catch { }
                     File.Move(from, to);
                 }
-                string cur = GenerationFile(1);
+                string cur = GenerationFile(stream, 1);
                 try { if (File.Exists(cur)) File.Delete(cur); } catch { }
                 File.Move(path, cur);
-                _count = 0;
-                _countLoaded = true;
+                _count[stream] = 0;
+                _countLoaded[stream] = true;
                 return true;
             }
             catch (Exception ex)
             {
                 LastError = "ротация: " + ex.Message;
                 // Счётчик не доверяем: сдвиг мог не дойти до конца.
-                _countLoaded = false;
+                _countLoaded[stream] = false;
                 return false;
             }
         }
@@ -3104,15 +3219,24 @@ namespace UsbBlockTray
 
         // ---- Чтение ----
 
-        // Все записи журнала, свежие сверху. limit ограничивает выдачу,
-        // чтобы окно просмотра не тянуло в память весь архив.
+        // Все записи журнала, свежие сверху. Читаются оба журнала и
+        // сшиваются по времени: показ должен быть общим (в окне просмотра
+        // записи всё равно разбираются по вкладкам), но читать приходится
+        // два независимых файла. limit ограничивает выдачу, чтобы окно
+        // просмотра не тянуло в память весь архив.
         public static List<string> ReadRecent(int limit)
+        {
+            return MergeNewest(ReadStream(StreamDevices, limit),
+                ReadStream(StreamFiles, limit), limit);
+        }
+
+        private static List<string> ReadStream(int stream, int limit)
         {
             List<string> lines = new List<string>();
             for (int g = 0; g <= StorePaths.JournalGenerations; g++)
             {
                 if (limit > 0 && lines.Count >= limit) break;
-                string path = GenerationFile(g);
+                string path = GenerationFile(stream, g);
                 if (!File.Exists(path)) continue;
                 List<string> part;
                 try
@@ -3132,6 +3256,52 @@ namespace UsbBlockTray
                 }
             }
             return lines;
+        }
+
+        // Сшивка двух списков, уже отсортированных свежими сверху, в один.
+        // Совпавшая секунда (запись о подключении и запись о файле из
+        // одного цикла) разрешается в пользу журнала копирования: в этот
+        // же момент там самая свежая активность. Ограничивается limit.
+        private static List<string> MergeNewest(List<string> devices,
+            List<string> files, int limit)
+        {
+            if (files == null || files.Count == 0) return devices ?? new List<string>();
+            if (devices == null || devices.Count == 0) return files;
+            List<string> merged = new List<string>(devices.Count + files.Count);
+            int i = 0, j = 0;
+            while (i < devices.Count && j < files.Count)
+            {
+                if (string.Compare(TimeKey(files[j]), TimeKey(devices[i]),
+                    StringComparison.Ordinal) >= 0)
+                {
+                    merged.Add(files[j++]);
+                }
+                else
+                {
+                    merged.Add(devices[i++]);
+                }
+                if (limit > 0 && merged.Count >= limit) return merged;
+            }
+            while (i < devices.Count)
+            {
+                merged.Add(devices[i++]);
+                if (limit > 0 && merged.Count >= limit) break;
+            }
+            while (j < files.Count)
+            {
+                merged.Add(files[j++]);
+                if (limit > 0 && merged.Count >= limit) break;
+            }
+            return merged;
+        }
+
+        // Время записи - первые 19 символов строки ("yyyy-MM-dd HH:mm:ss"):
+        // в фиксированном формате оно сравнивается как строка так же, как
+        // по времени, и DateTime на каждую запись не нужен.
+        private static string TimeKey(string line)
+        {
+            if (string.IsNullOrEmpty(line)) return string.Empty;
+            return line.Length > 19 ? line.Substring(0, 19) : line;
         }
 
         private static List<string> ReadFile(string path, int limit)
@@ -3161,20 +3331,71 @@ namespace UsbBlockTray
             return result;
         }
 
-        // Удаление журнала (пункт «Удалить сохранённые данные?»).
+        // Чтение ОДНОГО файла журнала по любому пути - окно просмотра умеет
+        // открыть файл из любого места (копию, перенесённый, снятый с другой
+        // машины той же Windows). Записи возвращаются свежими сверху, как в
+        // ReadRecent. Шифрование - DPAPI LocalMachine, поэтому файл другой
+        // машины прочитать не удастся: это норма, о ней говорится явно.
+        public static List<string> ReadExternalFile(string path, int limit)
+        {
+            if (string.IsNullOrEmpty(path))
+                throw new IOException("не указан файл журнала");
+            if (!File.Exists(path))
+                throw new FileNotFoundException("файл журнала не найден: " + path);
+            List<string> part;
+            try
+            {
+                part = ReadFile(path, limit);
+            }
+            catch (CryptographicException)
+            {
+                throw new IOException("файл не расшифровывается: он сделан " +
+                    "на другой машине или другим шифрованием (DPAPI)");
+            }
+            catch (IOException ex)
+            {
+                throw new IOException("не похоже на файл журнала USB_Block (" +
+                    ex.Message + "): " + path);
+            }
+            List<string> lines = new List<string>();
+            for (int i = part.Count - 1; i >= 0; i--) lines.Add(part[i]);
+            return lines;
+        }
+
+        // Сколько записей в файле по любому пути (без расшифровки - только
+        // по заголовкам длин, поэтому дёшево). Нужно строке состояния окна.
+        public static int CountExternalFile(string path)
+        {
+            try
+            {
+                return CountRecords(path);
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        // Удаление журнала (пункт «Удалить сохранённые данные?»): оба
+        // журнала, все поколения.
         public static void Clear()
         {
-            for (int g = 0; g <= StorePaths.JournalGenerations; g++)
+            for (int stream = 0; stream < StreamCount; stream++)
             {
-                try
+                for (int g = 0; g <= StorePaths.JournalGenerations; g++)
                 {
-                    string f = GenerationFile(g);
-                    if (File.Exists(f)) File.Delete(f);
-                }
-                catch
-                {
+                    try
+                    {
+                        string f = GenerationFile(stream, g);
+                        if (File.Exists(f)) File.Delete(f);
+                    }
+                    catch
+                    {
+                    }
                 }
             }
+            // Счётчики в памяти соответствуют удалённым файлам.
+            ResetCountForTest();
             LastError = null;
         }
     }
@@ -3692,7 +3913,6 @@ namespace UsbBlockTray
 
             try
             {
-                bool blocked = PolicyManager.IsBlocked();
                 List<DeviceEntry> wl = UsbMonitor.GetWhitelist();
                 List<StorageDevice> disks = UsbQuery.GetUsbStorages();
 
@@ -3709,7 +3929,7 @@ namespace UsbBlockTray
                 // половина не обходится вовсе.
                 if (JournalSettings.IsConnectionsEnabled())
                 {
-                    JournalDevices(disks, wl, blocked, gap, nowLocal);
+                    JournalDevices(disks, wl, gap, nowLocal);
                 }
                 if (JournalSettings.IsFilesEnabled())
                 {
@@ -3850,7 +4070,7 @@ namespace UsbBlockTray
         // ---- Устройства: подключение / отключение ----
 
         private static void JournalDevices(List<StorageDevice> disks,
-            List<DeviceEntry> wl, bool blocked, bool silent, DateTime nowLocal)
+            List<DeviceEntry> wl, bool silent, DateTime nowLocal)
         {
             if (_present == null) _present = LoadPresence();
 
@@ -3861,33 +4081,26 @@ namespace UsbBlockTray
             {
                 string key = DeviceKey(d);
                 if (key == null) continue;
-                string detail = DescribeDevice(d, wl, blocked);
+                string detail = DescribeDevice(d, wl);
                 if (!now.ContainsKey(key)) now[key] = detail;
             }
 
-            // Появились. Причина пишется явно: обычное подключение отличается от
-            // находки при первом запуске журнала и от находки после перерыва
-            // в наблюдении (перезапуск программы или службы) - иначе
-            // нельзя понять, было ли устройство подключено сейчас или его
-            // просто не было видно, пока журнал не работал.
-            string reason = silent
-                ? (_primed ? "обнаружено после перерыва в наблюдении"
-                           : "обнаружено при запуске журнала")
-                : "подключение";
+            // Появились. Отдельного поля "Причина" уже нет: вид записи
+            // (подключён / обнаружен) и так говорит, было ли устройство
+            // вставлено сейчас или просто не было видно, пока журнал
+            // не работал; отключение - это свой вид записи.
             foreach (KeyValuePair<string, string> kv in now)
             {
                 if (_present.ContainsKey(kv.Key)) continue;
                 UsbJournal.Write(silent ? UsbJournal.KindDeviceFound
-                    : UsbJournal.KindDeviceAdded,
-                    kv.Value + " | Причина=" + reason);
+                    : UsbJournal.KindDeviceAdded, kv.Value);
             }
 
             // Исчезли.
             foreach (KeyValuePair<string, string> kv in _present)
             {
                 if (now.ContainsKey(kv.Key)) continue;
-                UsbJournal.Write(UsbJournal.KindDeviceRemoved,
-                    kv.Value + " | Причина=отключение");
+                UsbJournal.Write(UsbJournal.KindDeviceRemoved, kv.Value);
             }
 
             _present = now;
@@ -3915,18 +4128,23 @@ namespace UsbBlockTray
             return true;
         }
 
-        // Описание накопителя для записи журнала. VID:PID здесь НЕ пишется:
-        // это идентификатор узла USB, по которому устройство и так опознаётся
-        // по серийному номеру, а в журнале он только засоряет строку.
-        internal static string DescribeDevice(StorageDevice d, List<DeviceEntry> wl, bool blocked)
+        // Описание накопителя для записи журнала. Здесь НЕ пишется VID:PID
+        // (идентификатор узла USB - серийника достаточно, а строку он только
+        // засоряет), состояние блокировки (это свойство ПРОГРАММЫ, а не
+        // подключения: в записи о носителе оно только путает) и причина
+        // (вид записи и так говорит: подключён / обнаружен / отключён).
+        // Метка тома берётся из кэша цикла по букве диска: сам StorageDevice
+        // её не несёт, и без этого поле было бы всегда "Метка=-".
+        internal static string DescribeDevice(StorageDevice d, List<DeviceEntry> wl)
         {
             StringBuilder sb = new StringBuilder();
+            string letter = LetterOf(d);
+            string label = d.Label;
+            if (string.IsNullOrEmpty(label)) label = VolumeLabelOf(letter);
             sb.Append("SN=").Append(string.IsNullOrEmpty(d.Serial) ? "-" : d.Serial);
             sb.Append(" | Модель=").Append(string.IsNullOrEmpty(d.Model) ? "-" : d.Model);
-            sb.Append(" | Метка=").Append(string.IsNullOrEmpty(d.Label) ? "-" : d.Label);
-            sb.Append(" | Блокировка=").Append(blocked ? "включена" : "выключена");
+            sb.Append(" | Метка=").Append(string.IsNullOrEmpty(label) ? "-" : label);
             bool allowed = IsAllowed(d, wl);
-            string letter = LetterOf(d);
             sb.Append(" | Решение=").Append(allowed ? "разрешён" : "заблокирован");
             sb.Append(" | Буква=").Append(string.IsNullOrEmpty(letter) ? "-" : letter + ":");
             return sb.ToString();
@@ -4084,15 +4302,20 @@ namespace UsbBlockTray
         // Идентификатор тома для снимка. Одного серийного номера мало: у
         // накопителя с несколькими разделами он общий, и второй раздел
         // затёр бы снимок первого - а это десятки тысяч ложных "удалён".
-        // Поэтому в ключ входит и номер физического диска.
+        // Номера физического диска тоже мало: разделы одного диска его
+        // разделяют (буквы F: и G: на одном диске дали ОДИН ключ, и
+        // снимки перетирали друг друга каждый цикл). Поэтому в ключ
+        // входит номер РАЗДЕЛА (WMI: "Disk #2, Partition #0"); если он
+        // неизвестен, остаётся прежняя лестница: серийник, диск, буква.
         internal static string VolumeKey(UsbVolume v)
         {
             if (v == null) return null;
             bool hasSerial = !string.IsNullOrEmpty(v.Serial);
-            bool hasDisk = !string.IsNullOrEmpty(v.DiskId);
-            if (hasSerial && hasDisk) return "V:" + v.Serial + "#" + v.DiskId;
+            string part = !string.IsNullOrEmpty(v.PartitionId) ? v.PartitionId : v.DiskId;
+            bool hasPart = !string.IsNullOrEmpty(part);
+            if (hasSerial && hasPart) return "V:" + v.Serial + "#" + part;
             if (hasSerial) return "V:" + v.Serial;
-            if (hasDisk) return "D:" + v.DiskId;
+            if (hasPart) return "D:" + part;
             if (!string.IsNullOrEmpty(v.DriveLetter)) return "L:" + v.DriveLetter;
             return null;
         }
@@ -5680,6 +5903,12 @@ foreach (string path in oldFiles.Keys)
         private readonly TextBox _files;
         private readonly TextBox _notes;
         private readonly Label _status;
+        private readonly Button _open;
+        private readonly Button _live;
+
+        // Открытый файл журнала из другого места; null - обычный журнал
+        // этой машины. Файл читается только для показа, ничего не пишется.
+        private string _external;
 
         public JournalViewForm()
         {
@@ -5687,13 +5916,13 @@ foreach (string path in oldFiles.Keys)
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.Sizable;
             this.MinimizeBox = false;
-            this.ClientSize = new Size(920, 620);
+            this.ClientSize = new Size(1000, 620);
             this.Font = SystemFonts.MessageBoxFont;
             this.AutoScaleDimensions = new SizeF(7F, 15F);
             this.AutoScaleMode = AutoScaleMode.Font;
 
             _tabs = new TabControl();
-            _tabs.SetBounds(12, 8, 896, 560);
+            _tabs.SetBounds(12, 8, 976, 560);
             this.Controls.Add(_tabs);
 
             _devices = MakeBox();
@@ -5704,18 +5933,31 @@ foreach (string path in oldFiles.Keys)
             _tabs.TabPages.Add(MakePage("Служебные записи", _notes));
 
             _status = new Label();
-            _status.SetBounds(12, 574, 620, 22);
+            _status.SetBounds(12, 574, 434, 22);
             this.Controls.Add(_status);
+
+            _open = new Button();
+            _open.Text = "Открыть файл...";
+            _open.SetBounds(452, 572, 124, 27);
+            _open.Click += delegate { OpenExternal(); };
+            this.Controls.Add(_open);
+
+            _live = new Button();
+            _live.Text = "К журналу";
+            _live.SetBounds(584, 572, 116, 27);
+            _live.Enabled = false;
+            _live.Click += delegate { _external = null; Fill(); };
+            this.Controls.Add(_live);
 
             Button refresh = new Button();
             refresh.Text = "Обновить";
-            refresh.SetBounds(660, 572, 108, 27);
+            refresh.SetBounds(708, 572, 108, 27);
             refresh.Click += delegate { Fill(); };
             this.Controls.Add(refresh);
 
             Button copy = new Button();
             copy.Text = "Копировать";
-            copy.SetBounds(776, 572, 108, 27);
+            copy.SetBounds(824, 572, 116, 27);
             copy.Click += delegate { CopyCurrent(); };
             this.Controls.Add(copy);
 
@@ -5753,7 +5995,13 @@ foreach (string path in oldFiles.Keys)
         {
             try
             {
-                List<string> lines = UsbJournal.ReadRecent(LimitPerTab * 3);
+                // Открытый чужой файл показывается вместо журнала машины
+                // (и только для показа - ни записи, ни состояние наблюдения
+                // при этом не трогаются).
+                bool external = _external != null;
+                List<string> lines = external
+                    ? UsbJournal.ReadExternalFile(_external, LimitPerTab * 3)
+                    : UsbJournal.ReadRecent(LimitPerTab * 3);
                 List<string> dev = new List<string>();
                 List<string> files = new List<string>();
                 List<string> notes = new List<string>();
@@ -5780,18 +6028,31 @@ foreach (string path in oldFiles.Keys)
                 SetText(_files, files);
                 SetText(_notes, notes);
 
-                long bytes = UsbJournal.TotalSizeBytes();
+                _live.Enabled = external;
+                this.Text = external
+                    ? "Журнал USB-блокировки - " + Path.GetFileName(_external)
+                    : "Журнал USB-блокировки";
+
+                long bytes = external
+                    ? new FileInfo(_external).Length
+                    : UsbJournal.TotalSizeBytes();
+                int total = external
+                    ? UsbJournal.CountExternalFile(_external)
+                    : UsbJournal.TotalRecordCount();
                 _status.Text =
-                    (JournalSettings.IsEnabled()
+                    (external
+                        ? "ОТКРЫТ ФАЙЛ: " + _external + "   "
+                        : string.Empty) +
+                    (external || JournalSettings.IsEnabled()
                         ? string.Empty
                         : "ВЕДЕНИЕ ЖУРНАЛА ВЫКЛЮЧЕНО (нет установленной службы) " +
                           "- показаны ранее записанные записи.   ") +
-                    (JournalSettings.IsFilesEnabled()
+                    (external || JournalSettings.IsFilesEnabled()
                         ? string.Empty
                         : "Журнал копирования выключен (меню трея, пункт J) - " +
                           "файловые записи не обновляются.   ") +
-                    "Записей в файлах журнала: " +
-                    UsbJournal.TotalRecordCount().ToString(CultureInfo.InvariantCulture) +
+                    "Записей: " +
+                    total.ToString(CultureInfo.InvariantCulture) +
                     "   Размер: " + bytes.ToString(CultureInfo.InvariantCulture) + " байт" +
                     "   Показано: устройств " + shownDev.ToString(CultureInfo.InvariantCulture) +
                     " / файлов " + shownFiles.ToString(CultureInfo.InvariantCulture) +
@@ -5800,7 +6061,35 @@ foreach (string path in oldFiles.Keys)
             }
             catch (Exception ex)
             {
-                _status.Text = "Не удалось прочитать журнал: " + ex.Message;
+                _live.Enabled = _external != null;
+                _status.Text = (_external != null
+                    ? "Не удалось прочитать файл " + _external + ": "
+                    : "Не удалось прочитать журнал: ") + ex.Message;
+            }
+        }
+
+        // Открытие файла журнала из любого места: копии, перенесённого,
+        // снятого с другой машины. Показывается только для чтения.
+        private void OpenExternal()
+        {
+            using (OpenFileDialog dialog = new OpenFileDialog())
+            {
+                dialog.Title = "Открыть файл журнала";
+                dialog.Filter = "Файлы журнала (journal*.dat)|journal*.dat|" +
+                    "Все файлы (*.*)|*.*";
+                dialog.CheckFileExists = true;
+                dialog.Multiselect = false;
+                try
+                {
+                    if (Directory.Exists(StorePaths.Directory))
+                        dialog.InitialDirectory = StorePaths.Directory;
+                }
+                catch
+                {
+                }
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                _external = dialog.FileName;
+                Fill();
             }
         }
 
@@ -5847,10 +6136,7 @@ foreach (string path in oldFiles.Keys)
 
         private static bool IsFileKind(string kind)
         {
-            return kind == UsbJournal.KindFileAdded ||
-                   kind == UsbJournal.KindFileChanged ||
-                   kind == UsbJournal.KindFileRemoved ||
-                   kind == UsbJournal.KindFileRenamed;
+            return UsbJournal.IsFileKind(kind);
         }
 
         // Читаемая строка: время, вид операции словами, подробности.
@@ -8395,16 +8681,22 @@ foreach (string path in oldFiles.Keys)
                 (JournalSettings.IsFilesEnabled()
                     ? "ВКЛЮЧЁН (галочка пункта J в меню трея)"
                     : "ВЫКЛЮЧЕН (галочка пункта J в меню трея) - записи о файлах не пишутся"));
-            sb.AppendLine("Размер кольца журнала: " +
+            sb.AppendLine("Размер кольца каждого журнала: " +
                 (StorePaths.JournalGenerations + 1).ToString(CultureInfo.InvariantCulture) +
                 " файлов по " + UsbJournal.MaxRecordsPerFile.ToString(CultureInfo.InvariantCulture) +
-                " записей");
-            sb.AppendLine("Файл: " + StorePaths.JournalFile +
+                " записей (два независимых журнала: подключения и копирование)");
+            sb.AppendLine("Файл подключений: " + StorePaths.JournalFile +
                 "  существует=" + File.Exists(StorePaths.JournalFile));
+            sb.AppendLine("Файл копирования: " + StorePaths.JournalFilesFile +
+                "  существует=" + File.Exists(StorePaths.JournalFilesFile));
             sb.AppendLine("Поколений: " + (StorePaths.JournalGenerations + 1) +
                 "  записей всего: " +
                 UsbJournal.TotalRecordCount().ToString(CultureInfo.InvariantCulture) +
-                "  в текущем файле: " +
+                " (подключений и служебных: " +
+                UsbJournal.TotalRecordCount(UsbJournal.StreamDevices).ToString(CultureInfo.InvariantCulture) +
+                ", файловых: " +
+                UsbJournal.TotalRecordCount(UsbJournal.StreamFiles).ToString(CultureInfo.InvariantCulture) + ")" +
+                "  в текущих файлах: " +
                 UsbJournal.CurrentRecordCount().ToString(CultureInfo.InvariantCulture) +
                 "  размер всего: " +
                 UsbJournal.TotalSizeBytes().ToString(CultureInfo.InvariantCulture) + " байт");
@@ -8785,6 +9077,49 @@ foreach (string path in oldFiles.Keys)
         {
             StringBuilder sb = new StringBuilder();
 
+            // Версия: AssemblyVersion/FileVersion обязаны совпадать между
+            // собой и с app.manifest (там assemblyIdentity) - иначе в
+            // свойствах файла и в манифесте разойдутся цифры. Манифест
+            // рядом с exe есть только в папке разработчика; если его нет,
+            // сверяемся только внутри сборки.
+            try
+            {
+                Assembly asm = Assembly.GetExecutingAssembly();
+                string asmVer = asm.GetName().Version.ToString();
+                string fileVer = FileVersionInfo
+                    .GetVersionInfo(asm.Location).FileVersion;
+                string manifestVer = null;
+                string manifestPath = Path.Combine(
+                    Path.GetDirectoryName(asm.Location) ?? string.Empty,
+                    "app.manifest");
+                if (File.Exists(manifestPath))
+                {
+                    foreach (string ln in File.ReadAllLines(manifestPath))
+                    {
+                        int p = ln.IndexOf("assemblyIdentity", StringComparison.Ordinal);
+                        if (p < 0) continue;
+                        int v = ln.IndexOf("version=\"", p, StringComparison.Ordinal);
+                        if (v < 0) continue;
+                        v += "version=\"".Length;
+                        int e = ln.IndexOf('"', v);
+                        if (e > v) manifestVer = ln.Substring(v, e - v);
+                        break;
+                    }
+                }
+                bool verOk = !string.IsNullOrEmpty(asmVer) &&
+                    asmVer == fileVer &&
+                    (manifestVer == null || manifestVer == asmVer);
+                sb.AppendLine("Build version (assembly/file/манифест): " +
+                    (verOk ? "OK" : "FAIL") +
+                    " (assembly=" + asmVer +
+                    " file=" + fileVer +
+                    " манифест=" + (manifestVer ?? "нет рядом") + ")");
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine("Build version ERROR: " + ex.Message);
+            }
+
             List<DeviceEntry> list = new List<DeviceEntry>();
             list.Add(new DeviceEntry
             {
@@ -9028,7 +9363,9 @@ foreach (string path in oldFiles.Keys)
                 UsbJournal.UseDirectoryForTest(jDir);
 
                 // 1) запись -> чтение: содержимое возвращается тем же,
-                //    а порядок обратный (свежие сверху)
+                //    а порядок обратный (свежие сверху); записи о файлах
+                //    уходят в СВОЙ журнал и при чтении сшиваются с
+                //    журналом подключений по времени
                 int gens = StorePaths.JournalGenerations;
                 StorePaths.JournalGenerations = 0;      // только текущий файл
                 try
@@ -9042,9 +9379,15 @@ foreach (string path in oldFiles.Keys)
                         back[1].Contains("файл.txt") &&
                         back[2].Contains("Модель=Проверка") &&
                         UsbJournal.CurrentRecordCount() == 3 &&
-                        // файл не должен содержать открытый текст
+                        // вид записи решает, в какой файл она попала:
+                        // подключение - в journal.dat, файлы - в journal_files.dat
+                        UsbJournal.CurrentRecordCount(UsbJournal.StreamDevices) == 1 &&
+                        UsbJournal.CurrentRecordCount(UsbJournal.StreamFiles) == 2 &&
+                        // файлы не должны содержать открытый текст
                         !File.ReadAllText(UsbJournal.CurrentPath,
-                            System.Text.Encoding.ASCII).Contains("Проверка");
+                            System.Text.Encoding.ASCII).Contains("Проверка") &&
+                        !File.ReadAllText(UsbJournal.CurrentFilesPath,
+                            System.Text.Encoding.ASCII).Contains("старое.txt");
                     sb.AppendLine("Journal write/read (encrypted, newest first): " +
                         (roundTrip ? "OK" : "FAIL"));
                 }
@@ -9055,6 +9398,45 @@ foreach (string path in oldFiles.Keys)
                 finally
                 {
                     StorePaths.JournalGenerations = gens;
+                }
+
+                // 1г) чтение файла журнала по любому пути (окно просмотра
+                //     умеет открывать файл из любого места): тот же порядок,
+                //     что и при обычном чтении, для КАЖДОГО из двух журналов;
+                //     не-журнальный файл - явная ошибка, а не пустой список
+                try
+                {
+                    List<string> extDev = UsbJournal.ReadExternalFile(
+                        UsbJournal.CurrentPath, 0);
+                    List<string> extFiles = UsbJournal.ReadExternalFile(
+                        UsbJournal.CurrentFilesPath, 0);
+                    bool extOk = extDev.Count == 1 &&
+                        extDev[0].Contains("Модель=Проверка") &&
+                        extFiles.Count == 2 &&
+                        extFiles[0].Contains("старое.txt") &&
+                        extFiles[1].Contains("файл.txt") &&
+                        UsbJournal.CountExternalFile(UsbJournal.CurrentPath) == 1 &&
+                        UsbJournal.CountExternalFile(UsbJournal.CurrentFilesPath) == 2;
+                    bool extBad = false;
+                    string notJournal = Path.Combine(jDir, "not_a_journal.dat");
+                    File.WriteAllText(notJournal, "просто текст, не журнал");
+                    try
+                    {
+                        UsbJournal.ReadExternalFile(notJournal, 0);
+                    }
+                    catch (IOException)
+                    {
+                        extBad = true;
+                    }
+                    sb.AppendLine("Journal external file (открытие из любого места): " +
+                        (extOk && extBad ? "OK" : "FAIL") +
+                        " (подключений=" + extDev.Count.ToString(CultureInfo.InvariantCulture) +
+                        " файловых=" + extFiles.Count.ToString(CultureInfo.InvariantCulture) +
+                        " не_журнал_ошибка=" + extBad.ToString() + ")");
+                }
+                catch (Exception ex)
+                {
+                    sb.AppendLine("Journal external file ERROR: " + ex.Message);
                 }
 
                 // 1б) ротация: при переполнении текущего файла поколения
@@ -9098,6 +9480,56 @@ foreach (string path in oldFiles.Keys)
                 catch (Exception ex)
                 {
                     sb.AppendLine("Journal rotation ERROR: " + ex.Message);
+                }
+
+                // 1д) два журнала кольцуются РАЗДЕЛЬНО: поток копирования
+                //     не двигает поколения записей о подключениях (иначе
+                //     копирование тысяч файлов стирало записи о подключении)
+                try
+                {
+                    int gens3 = StorePaths.JournalGenerations;
+                    StorePaths.JournalGenerations = 3;      // journal_1.._3
+                    int max3 = UsbJournal.MaxRecordsPerFile;
+                    UsbJournal.MaxRecordsPerFile = 4;
+                    UsbJournal.Clear();
+                    UsbJournal.ResetCountForTest();
+                    try
+                    {
+                        for (int i = 1; i <= 6; i++)
+                            UsbJournal.Write(UsbJournal.KindDeviceAdded,
+                                "SN=РАЗДЕЛЬНО" + i.ToString(CultureInfo.InvariantCulture));
+                        for (int i = 1; i <= 6; i++)
+                            UsbJournal.Write(UsbJournal.KindFileAdded,
+                                @"X:\раздельно\" + i.ToString(CultureInfo.InvariantCulture) + ".txt");
+
+                        // 6 подключений: journal.dat - 2, journal_1 - 4;
+                        // 6 файлов: journal_files.dat - 2, journal_files_1 - 4
+                        int devCur = UsbJournal.CurrentRecordCount(UsbJournal.StreamDevices);
+                        int filesCur = UsbJournal.CurrentRecordCount(UsbJournal.StreamFiles);
+                        List<string> all = UsbJournal.ReadRecent(0);
+                        bool splitOk = devCur == 2 && filesCur == 2 &&
+                            UsbJournal.TotalRecordCount(UsbJournal.StreamDevices) == 6 &&
+                            UsbJournal.TotalRecordCount(UsbJournal.StreamFiles) == 6 &&
+                            UsbJournal.TotalRecordCount() == 12 &&
+                            all.Count == 12 &&
+                            File.Exists(UsbJournal.CurrentPath) &&
+                            File.Exists(UsbJournal.CurrentFilesPath);
+                        sb.AppendLine("Journal split rings (копирование не вытесняет подключения): " +
+                            (splitOk ? "OK" : "FAIL") +
+                            " (подключений в текущем " + devCur.ToString(CultureInfo.InvariantCulture) +
+                            ", файловых в текущем " + filesCur.ToString(CultureInfo.InvariantCulture) +
+                            ", всего прочитано " + all.Count.ToString(CultureInfo.InvariantCulture) + ")");
+                    }
+                    finally
+                    {
+                        UsbJournal.MaxRecordsPerFile = max3;
+                        StorePaths.JournalGenerations = gens3;
+                        UsbJournal.ResetCountForTest();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    sb.AppendLine("Journal split rings ERROR: " + ex.Message);
                 }
 
                 // 2) дифф снимков: создание, изменение, удаление, переименование
@@ -9172,22 +9604,40 @@ foreach (string path in oldFiles.Keys)
                     sb.AppendLine("Journal volume scan ERROR: " + ex.Message);
                 }
 
-                // 3б) два раздела одного накопителя: серийный номер общий,
-                //     и снимок второго не должен затирать снимок первого
+                // 3б) два раздела ОДНОГО накопителя: серийный номер и номер
+                //     физического диска у них общие, а снимки обязаны быть
+                //     раздельными - иначе каждый цикл перетирал бы снимок
+                //     и писал бы десятки тысяч ложных «удалён» (буквы F: и
+                //     G: на одном диске). Смена буквы ключ менять не должна.
                 try
                 {
                     UsbVolume p1 = new UsbVolume();
                     p1.Serial = "ОДИН_SN";
                     p1.DiskId = @"\\.\PHYSICALDRIVE2";
-                    p1.DriveLetter = "E";
+                    p1.PartitionId = "Disk #2, Partition #0";
+                    p1.DriveLetter = "F";
                     UsbVolume p2 = new UsbVolume();
                     p2.Serial = "ОДИН_SN";
-                    p2.DiskId = @"\\.\PHYSICALDRIVE3";
-                    p2.DriveLetter = "F";
+                    p2.DiskId = @"\\.\PHYSICALDRIVE2";
+                    p2.PartitionId = "Disk #2, Partition #1";
+                    p2.DriveLetter = "G";
+                    UsbVolume p3 = new UsbVolume();   // тот же раздел, другая буква
+                    p3.Serial = "ОДИН_SN";
+                    p3.DiskId = @"\\.\PHYSICALDRIVE2";
+                    p3.PartitionId = "Disk #2, Partition #1";
+                    p3.DriveLetter = "H";
+                    UsbVolume p4 = new UsbVolume();   // раздел неизвестен - запасной ключ
+                    p4.Serial = "ОДИН_SN";
+                    p4.DiskId = @"\\.\PHYSICALDRIVE2";
+                    p4.DriveLetter = "F";
                     string k1 = UsbJournalMonitor.VolumeKey(p1);
                     string k2 = UsbJournalMonitor.VolumeKey(p2);
-                    bool partOk = k1 != null && k2 != null &&
-                        !string.Equals(k1, k2, StringComparison.OrdinalIgnoreCase);
+                    string k3 = UsbJournalMonitor.VolumeKey(p3);
+                    string k4 = UsbJournalMonitor.VolumeKey(p4);
+                    bool partOk = k1 != null && k2 != null && k4 != null &&
+                        !string.Equals(k1, k2, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(k2, k3, StringComparison.OrdinalIgnoreCase) &&
+                        !string.Equals(k1, k4, StringComparison.OrdinalIgnoreCase);
                     sb.AppendLine("Journal multi-partition key: " +
                         (partOk ? "OK" : "FAIL"));
                 }
@@ -9392,7 +9842,8 @@ foreach (string path in oldFiles.Keys)
                 }
 
                 // 3в) состав записей: в записи о подключении не должно быть
-                //      VID:PID, в записи о файле - модели накопителя
+                //      VID:PID, "Блокировка=" и "Причина=", метка тома должна
+                //      быть заполнена; в записи о файле - модели накопителя
                 try
                 {
                     StorageDevice sd = new StorageDevice();
@@ -9401,22 +9852,32 @@ foreach (string path in oldFiles.Keys)
                     sd.Model = "Модель_Проверка";
                     sd.Label = "Метка_Проверка";
                     // DiskDeviceId не задан - буква не ищется, WMI не трогается
-                    string devLine = UsbJournalMonitor.DescribeDevice(sd, null, false);
+                    string devLine = UsbJournalMonitor.DescribeDevice(sd, null);
 
                     UsbVolume uv = new UsbVolume();
                     uv.Serial = "SN_ПРОВЕРКА";
                     uv.Model = "Модель_Проверка";
                     string fileLine = UsbJournalMonitor.VolumeDeviceInfo(uv);
 
+                    // Без метки у самого устройства: берётся из кэша цикла
+                    // по букве, а буквы нет - остаётся "-"
+                    StorageDevice bare = new StorageDevice();
+                    bare.Serial = "SN_ПРОВЕРКА";
+                    string bareLine = UsbJournalMonitor.DescribeDevice(bare, null);
+
                     bool fieldsOk =
                         devLine.IndexOf("VID:PID", StringComparison.OrdinalIgnoreCase) < 0 &&
+                        devLine.IndexOf("Блокировка=", StringComparison.Ordinal) < 0 &&
+                        devLine.IndexOf("Причина=", StringComparison.Ordinal) < 0 &&
+                        devLine.IndexOf("Метка=Метка_Проверка", StringComparison.Ordinal) >= 0 &&
+                        bareLine.IndexOf("Метка=-", StringComparison.Ordinal) >= 0 &&
                         devLine.IndexOf("SN_ПРОВЕРКА", StringComparison.Ordinal) >= 0 &&
                         devLine.IndexOf("Модель_Проверка", StringComparison.Ordinal) >= 0 &&
                         fileLine.IndexOf("Модель", StringComparison.OrdinalIgnoreCase) < 0 &&
                         fileLine.IndexOf("SN_ПРОВЕРКА", StringComparison.Ordinal) >= 0 &&
                         fileLine.IndexOf("Метка", StringComparison.OrdinalIgnoreCase) >= 0;
-                    sb.AppendLine("Journal record fields (no VID:PID / no Модель in files): " +
-                        (fieldsOk ? "OK" : "FAIL") + " [" + devLine + "] [" + fileLine + "]");
+                    sb.AppendLine("Journal record fields (no VID:PID/Блокировка/Причина, метка есть): " +
+                        (fieldsOk ? "OK" : "FAIL") + " [" + devLine + "] [" + bareLine + "] [" + fileLine + "]");
                 }
                 catch (Exception ex)
                 {
