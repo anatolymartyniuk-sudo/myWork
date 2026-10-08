@@ -21,8 +21,8 @@ using Microsoft.Win32;
 // Версия программы. Та же цифра стоит и в app.manifest (assemblyIdentity):
 // при каждой сборке обновляются ОБЕ, иначе в свойствах файла и в манифесте
 // разойдутся. Проверка - в самопроверке ("Build version").
-[assembly: AssemblyVersion("1.79.0.0")]
-[assembly: AssemblyFileVersion("1.79.0.0")]
+[assembly: AssemblyVersion("1.80.0.0")]
+[assembly: AssemblyFileVersion("1.80.0.0")]
 
 namespace UsbBlockTray
 {
