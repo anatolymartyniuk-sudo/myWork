@@ -21,8 +21,8 @@ using Microsoft.Win32;
 // Версия программы. Та же цифра стоит и в app.manifest (assemblyIdentity):
 // при каждой сборке обновляются ОБЕ, иначе в свойствах файла и в манифесте
 // разойдутся. Проверка - в самопроверке ("Build version").
-[assembly: AssemblyVersion("1.78.0.0")]
-[assembly: AssemblyFileVersion("1.78.0.0")]
+[assembly: AssemblyVersion("1.79.0.0")]
+[assembly: AssemblyFileVersion("1.79.0.0")]
 
 namespace UsbBlockTray
 {
@@ -40,7 +40,7 @@ namespace UsbBlockTray
 
         // Сообщение при блокировке постороннего накопителя (обязательный текст)
         public static readonly string NotifyText =
-            "ДОСТУП ЗАБЛОКОВАНО, ЗВЕРНІТЬСЯ ДО АДМІНІСТРАТОРА";
+            "ПРИСТРІЙ ЗАБЛОКОВАНО, ЗВЕРНІТЬСЯ ДО АДМІНІСТРАТОРА СЗІ";
 
         [STAThread]
         private static int Main(string[] args)
@@ -2387,6 +2387,23 @@ namespace UsbBlockTray
             }
             result.Sort((a, b) => a.Id.CompareTo(b.Id));
             return result;
+        }
+
+        // Текст строки блокировки для всплывающего уведомления и для журнала
+        // событий Windows (одинаковый в обоих местах). Показываем ТОЛЬКО
+        // модель устройства: в очереди label равен модели, а если модели нет -
+        // туда подставлен UsbId (VID:PID) либо идентификатор устройства;
+        // серийный номер и VID:PID в сообщение НЕ выводятся (этап 79).
+        public static string BlockDetail(string label)
+        {
+            string model = label;
+            if (!string.IsNullOrEmpty(model) &&
+                (model.IndexOf("VID_", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 model.IndexOf('\\') >= 0))
+                model = null;
+            return string.IsNullOrEmpty(model)
+                ? "Заблокирован накопитель"
+                : "Заблокирован накопитель: " + model;
         }
 
         private static string FormatValue(BlockEvent e)
@@ -8073,7 +8090,7 @@ foreach (string path in oldFiles.Keys)
             }
         }
 
-        // Самопроверка показа: показывает тестовое сообщение (окно без рамки,
+        // Самопроверка показа: показывает тестовое сообщение (окно с рамкой,
         // справа внизу) и ждёт, пока его закроют или оно закроется само.
         public static int TestPopup()
         {
@@ -8305,17 +8322,20 @@ foreach (string path in oldFiles.Keys)
 
         private static string BuildText(NotifyStore.BlockEvent e)
         {
-            string what = string.IsNullOrEmpty(e.Label) ? e.Serial : e.Label;
-            if (string.IsNullOrEmpty(what)) what = "USB-накопитель";
-            string detail = "Заблокирован накопитель: " + what +
-                (string.IsNullOrEmpty(e.Serial) ? string.Empty : "  SN=" + e.Serial);
-            return Program.NotifyText + "\n\n(" + detail + ")";
+            return Program.NotifyText + "\n\n(" +
+                NotifyStore.BlockDetail(e.Label) + ")";
         }
     }
 
-    // Всплывающее окно-сообщение (без рамки, справа внизу, закрывается само)
+    // Всплывающее окно-сообщение (рамка с закруглёнными углами, справа
+    // внизу, закрывается само)
     public sealed class NotifyPopup : Form
     {
+        // Радиус скругления углов окна и толщина рамки: рамка рисуется
+        // GDI+ внутри клиентской области, а регион обрезает углы фона.
+        private const int Corner = 10;
+        private const int Border = 2;
+
         private System.Windows.Forms.Timer _close;
         private Label _lbl;
         private readonly Size _textSize;
@@ -8346,6 +8366,12 @@ foreach (string path in oldFiles.Keys)
             this.AutoScaleDimensions = new SizeF(7F, 15F);   // метрики Segoe UI 9 пт (проектные)
             this.AutoScaleMode = AutoScaleMode.Font;
             this.BackColor = SystemColors.Control;
+            // Скруглённые углы и рамка рисуются GDI+ целиком в OnPaint:
+            // двойная буферизация и одна отрисовка без WM_ERASEBKGND,
+            // иначе рамка и углы мигают при показе окна.
+            this.SetStyle(ControlStyles.UserPaint |
+                ControlStyles.AllPaintingInWmPaint |
+                ControlStyles.OptimizedDoubleBuffer, true);
 
             _textSize = TextRenderer.MeasureText(text, this.Font,
                 new Size(350, int.MaxValue), TextFormatFlags.WordBreak);
@@ -8368,13 +8394,25 @@ foreach (string path in oldFiles.Keys)
             _close.Tick += delegate { CloseSelf(); };
         }
 
+        protected override void OnLoad(EventArgs e)
+        {
+            base.OnLoad(e);
+            // Границы считаются ДО показа окна: при StartPosition=Manual
+            // и Location, задававшемся только в OnShown, окно успевало
+            // появиться в левом верхнем углу (DefaultLocation) - DWM
+            // показывал этот кадр, и пользователь видел вспышку перед
+            // переходом в правый нижний угол. OnLoad вызывается до того,
+            // как окно станет видимым; TopOffset к этому моменту уже
+            // установлен вызывающей стороной (ShowNext).
+            ApplyBounds();
+        }
+
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
-            Rectangle wa = Screen.PrimaryScreen.WorkingArea;
-            this.ClientSize = new Size(_textSize.Width + 30, Math.Max(50, _textSize.Height + 24));
-            this.Location = new Point(wa.Right - this.Width - 12,
-                wa.Bottom - this.Height - 12 - TopOffset);
+            // Повторный расчёт (идемпотентный, обычно ничего не меняется):
+            // страхует от масштабирования по шрифту после загрузки.
+            ApplyBounds();
             _close.Start();
 
             Action<long> shown = Displayed;
@@ -8383,6 +8421,53 @@ foreach (string path in oldFiles.Keys)
                 try { shown(NotificationId); }
                 catch { }
             }
+        }
+
+        // Размер по тексту, скруглённый регион и позиция в правом нижнем
+        // углу рабочей области (с учётом TopOffset для стопки окон).
+        private void ApplyBounds()
+        {
+            Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+            this.ClientSize = new Size(_textSize.Width + 30, Math.Max(50, _textSize.Height + 24));
+            // Скруглённые углы: регион по итоговой клиентской области.
+            using (GraphicsPath path = RoundRect(
+                new Rectangle(Point.Empty, this.ClientSize), Corner))
+            {
+                Region old = this.Region;
+                this.Region = new Region(path);
+                if (old != null) old.Dispose();
+            }
+            this.Location = new Point(wa.Right - this.Width - 12,
+                wa.Bottom - this.Height - 12 - TopOffset);
+        }
+
+        // Рамка с закруглёнными углами: контур того же пути, что и регион
+        // (PenAlignment.Inset - штрих идёт внутрь и не вылезает за край).
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            Rectangle r = new Rectangle(0, 0,
+                Math.Max(1, ClientSize.Width - 1),
+                Math.Max(1, ClientSize.Height - 1));
+            using (GraphicsPath path = RoundRect(r, Corner))
+            using (Pen pen = new Pen(SystemColors.ControlDarkDark, Border))
+            {
+                pen.Alignment = PenAlignment.Inset;
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.DrawPath(pen, path);
+            }
+        }
+
+        private static GraphicsPath RoundRect(Rectangle r, int radius)
+        {
+            int d = radius * 2;
+            GraphicsPath p = new GraphicsPath();
+            p.AddArc(r.X, r.Y, d, d, 180, 90);
+            p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
         }
 
         private void CloseSelf()
@@ -8397,6 +8482,11 @@ foreach (string path in oldFiles.Keys)
             {
                 _close.Dispose();
                 _close = null;
+            }
+            if (this.Region != null)
+            {
+                this.Region.Dispose();
+                this.Region = null;
             }
             base.Dispose(disposing);
         }
@@ -8603,10 +8693,9 @@ foreach (string path in oldFiles.Keys)
 
                     try
                     {
-                        string what = string.IsNullOrEmpty(b.Label) ? b.Serial : b.Label;
                         EventLog.WriteEntry(ServiceManager.ServiceName,
-                            Program.NotifyText + "\n\nЗаблокирован накопитель: " + what +
-                            (string.IsNullOrEmpty(b.Serial) ? string.Empty : "  SN=" + b.Serial),
+                            Program.NotifyText + "\n\n" +
+                            NotifyStore.BlockDetail(b.Label),
                             EventLogEntryType.Warning);
                     }
                     catch
@@ -9118,6 +9207,27 @@ foreach (string path in oldFiles.Keys)
             catch (Exception ex)
             {
                 sb.AppendLine("Build version ERROR: " + ex.Message);
+            }
+
+            // Сообщение о блокировке: в нём только модель устройства -
+            // без SN и без VID:PID (одинаковый текст у уведомления и
+            // записи в журнале событий Windows).
+            try
+            {
+                string dModel = NotifyStore.BlockDetail("Samsung Portable SSD T3");
+                string dUsbId = NotifyStore.BlockDetail("USB\\VID_8564&PID_1000");
+                string dEmpty = NotifyStore.BlockDetail(null);
+                bool dOk = dModel == "Заблокирован накопитель: Samsung Portable SSD T3" &&
+                    dUsbId == "Заблокирован накопитель" &&
+                    dEmpty == "Заблокирован накопитель" &&
+                    !dModel.Contains("SN=") && !dModel.Contains("VID");
+                sb.AppendLine("Notify detail (только модель, без SN и VID:PID): " +
+                    (dOk ? "OK" : "FAIL") +
+                    " [" + dModel + "] [" + dUsbId + "] [" + dEmpty + "]");
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine("Notify detail ERROR: " + ex.Message);
             }
 
             List<DeviceEntry> list = new List<DeviceEntry>();
