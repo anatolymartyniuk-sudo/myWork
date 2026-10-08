@@ -21,8 +21,8 @@ using Microsoft.Win32;
 // Версия программы. Та же цифра стоит и в app.manifest (assemblyIdentity):
 // при каждой сборке обновляются ОБЕ, иначе в свойствах файла и в манифесте
 // разойдутся. Проверка - в самопроверке ("Build version").
-[assembly: AssemblyVersion("1.80.0.0")]
-[assembly: AssemblyFileVersion("1.80.0.0")]
+[assembly: AssemblyVersion("1.81.0.0")]
+[assembly: AssemblyFileVersion("1.81.0.0")]
 
 namespace UsbBlockTray
 {
@@ -36,7 +36,7 @@ namespace UsbBlockTray
         // уведомитель включается только после выгрузки трея.
         public const string TrayMutexName = MutexName;
 
-        public static readonly string Title = "USB-блокировка";
+        public static readonly string Title = "USB-блокування";
 
         // Сообщение при блокировке постороннего накопителя (обязательный текст)
         public static readonly string NotifyText =
@@ -93,8 +93,8 @@ namespace UsbBlockTray
                 {
                     if (!StartJournalViewer(true))
                     {
-                        MessageBox.Show("Журнал закрыт от обычного пользователя.\n" +
-                            "Не удалось получить права администратора.",
+                        MessageBox.Show("Журнал закрито для звичайного користувача.\n" +
+                            "Не вдалося отримати права адміністратора.",
                             Title, MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
                     }
                     return 0;
@@ -110,7 +110,7 @@ namespace UsbBlockTray
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show("Не удалось открыть журнал: " + ex.Message,
+                    MessageBox.Show("Не вдалося відкрити журнал: " + ex.Message,
                         Title, MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
                 }
                 return 0;
@@ -207,7 +207,7 @@ namespace UsbBlockTray
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show("Не удалось получить права администратора.\n" + ex.Message,
+                    MessageBox.Show("Не вдалося отримати права адміністратора.\n" + ex.Message,
                         Title, MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
                 }
                 return 0;
@@ -244,7 +244,7 @@ namespace UsbBlockTray
             {
                 if (!created)
                 {
-                    MessageBox.Show("Программа уже запущена (значок в трее).",
+                    MessageBox.Show("Програму вже запущено (значок у треї).",
                         Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return 1;
                 }
@@ -948,7 +948,7 @@ namespace UsbBlockTray
             {
                 byte ver = br.ReadByte();
                 if (ver != PayloadVer)
-                    throw new InvalidDataException("неизвестная версия whitelist");
+                    throw new InvalidDataException("невідома версія whitelist");
                 int count = br.ReadInt32();
                 for (int i = 0; i < count; i++)
                 {
@@ -978,7 +978,7 @@ namespace UsbBlockTray
             {
                 int b = plain[i];
                 if (b != Magic[i])
-                    throw new InvalidDataException("неверная сигнатура файла whitelist");
+                    throw new InvalidDataException("невірна сигнатура файлу whitelist");
             }
 
             byte[] payload = new byte[plain.Length - Magic.Length];
@@ -1114,9 +1114,9 @@ namespace UsbBlockTray
 
         public static string PolicyHint()
         {
-            return "Пароль должен быть не короче " +
+            return "Пароль має бути не коротшим за " +
                 MinLength.ToString(CultureInfo.InvariantCulture) +
-                " символов и содержать строчные и ПРОПИСНЫЕ латинские буквы и цифры.";
+                " символів і містити малі та ВЕЛИКІ латинські літери та цифри.";
         }
 
         // Кодовое слово - второй способ удалить пароль (в --selftest и при
@@ -1274,7 +1274,7 @@ namespace UsbBlockTray
         public static List<DeviceEntry> Import(string path)
         {
             byte[] file = File.ReadAllBytes(path);
-            if (file.Length < 8) throw new InvalidDataException("файл слишком мал");
+            if (file.Length < 8) throw new InvalidDataException("файл замалий");
 
             if (HasMagic(file, MagicPlain))
             {
@@ -1290,10 +1290,10 @@ namespace UsbBlockTray
 
             if (HasMagic(file, MagicEnc))
                 throw new InvalidDataException(
-                    "файл защищён паролем - парольная защита удалена; " +
-                    "экспортируйте whitelist заново со старого компьютера");
+                    "файл захищено паролем - парольний захист видалено; " +
+                    "експортуйте whitelist заново зі старого комп'ютера");
 
-            throw new InvalidDataException("неизвестный формат файла whitelist");
+            throw new InvalidDataException("невідомий формат файлу whitelist");
         }
 
         private static bool HasMagic(byte[] file, byte[] magic)
@@ -2317,10 +2317,10 @@ namespace UsbBlockTray
                     if (DateTime.Now - e.When < DedupWindow &&
                         SameDevice(e.Serial, e.Label, serial, label))
                     {
-                        NotifyService.TraceLog("дедупликация при записи: пропуск повторного " +
-                            "уведомления (тот же накопитель, событие было " +
+                        NotifyService.TraceLog("дедуплікація при записі: пропуск повторного " +
+                            "сповіщення (той самий накопичувач, подія була " +
                             (DateTime.Now - e.When).TotalSeconds.ToString("0", CultureInfo.InvariantCulture) +
-                            " с назад, окно " +
+                            " с тому, вікно " +
                             DedupWindow.TotalSeconds.ToString("0", CultureInfo.InvariantCulture) + " с)");
                         return false;
                     }
@@ -2344,7 +2344,7 @@ namespace UsbBlockTray
                     };
                     k.SetValue("E" + ne.Id, FormatValue(ne), RegistryValueKind.String);
                 }
-                NotifyService.TraceLog("записано событие id=" + newId.ToString(CultureInfo.InvariantCulture) +
+                NotifyService.TraceLog("записано подію id=" + newId.ToString(CultureInfo.InvariantCulture) +
                     " (SN=" + serial + ")");
                 return true;
             }
@@ -2802,7 +2802,7 @@ namespace UsbBlockTray
             uint access = FILE_APPEND_DATA | FILE_READ_ATTRIBUTES;
             uint disposition = OPEN_ALWAYS;
             if (!createIfMissing && !File.Exists(path))
-                throw new IOException("файл журнала ещё не создан: " + path);
+                throw new IOException("файл журналу ще не створено: " + path);
 
             IntPtr h = CreateFileW(path, access,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -3056,7 +3056,7 @@ namespace UsbBlockTray
             }
             catch (Exception ex)
             {
-                LastError = "шифрование: " + ex.Message;
+                LastError = "шифрування: " + ex.Message;
                 return;
             }
 
@@ -3083,8 +3083,8 @@ namespace UsbBlockTray
                 bool missing = !File.Exists(path);
                 if (missing && !_testMode && !Program.IsAdministrator())
                 {
-                    LastError = "нет файла журнала - его создаст первый запуск " +
-                        "с правами администратора (пункт J или установка службы)";
+                    LastError = "немає файлу журналу - його створить перший запуск " +
+                        "з правами адміністратора (пункт J або встановлення служби)";
                     return;
                 }
                 AppendBytes(path, BuildFrame(cipher), missing);
@@ -3100,7 +3100,7 @@ namespace UsbBlockTray
             }
             catch (Exception ex)
             {
-                LastError = "запись: " + ex.Message;
+                LastError = "запис: " + ex.Message;
             }
         }
 
@@ -3173,11 +3173,11 @@ namespace UsbBlockTray
                 // поколения рассчитан на это число, и просмотрщик принял бы
                 // его за повреждённый. Поэтому останавливаем запись с явной
                 // причиной: до появления администратора журнал не пишется.
-                LastError = "файл журнала заполнен (" +
+                LastError = "файл журналу заповнений (" +
                     MaxRecordsPerFile.ToString(CultureInfo.InvariantCulture) +
-                    " записей), а сдвинуть поколения может только администратор - " +
-                    "запись приостановлена (запустите программу с его правами " +
-                    "или поставьте службу мониторинга)";
+                    " записів), а зсувати покоління може лише адміністратор - " +
+                    "запис призупинено (запустіть програму з його правами " +
+                    "або встановіть службу моніторингу)";
                 _countLoaded[stream] = false;
                 return false;
             }
@@ -3203,7 +3203,7 @@ namespace UsbBlockTray
             }
             catch (Exception ex)
             {
-                LastError = "ротация: " + ex.Message;
+                LastError = "ротація: " + ex.Message;
                 // Счётчик не доверяем: сдвиг мог не дойти до конца.
                 _countLoaded[stream] = false;
                 return false;
@@ -3331,7 +3331,7 @@ namespace UsbBlockTray
                 if (fs.Read(magic, 0, magic.Length) != magic.Length) return result;
                 for (int i = 0; i < magic.Length; i++)
                     if (magic[i] != (byte)Magic[i])
-                        throw new IOException("повреждён заголовок файла журнала");
+                        throw new IOException("пошкоджений заголовок файлу журналу");
                 byte[] len = new byte[4];
                 while (true)
                 {
@@ -3356,9 +3356,9 @@ namespace UsbBlockTray
         public static List<string> ReadExternalFile(string path, int limit)
         {
             if (string.IsNullOrEmpty(path))
-                throw new IOException("не указан файл журнала");
+                throw new IOException("не вказано файл журналу");
             if (!File.Exists(path))
-                throw new FileNotFoundException("файл журнала не найден: " + path);
+                throw new FileNotFoundException("файл журналу не знайдено: " + path);
             List<string> part;
             try
             {
@@ -3366,12 +3366,12 @@ namespace UsbBlockTray
             }
             catch (CryptographicException)
             {
-                throw new IOException("файл не расшифровывается: он сделан " +
-                    "на другой машине или другим шифрованием (DPAPI)");
+                throw new IOException("файл не розшифровується: він зроблений " +
+                    "на іншій машині або іншим шифруванням (DPAPI)");
             }
             catch (IOException ex)
             {
-                throw new IOException("не похоже на файл журнала USB_Block (" +
+                throw new IOException("не схожий на файл журналу USB_Block (" +
                     ex.Message + "): " + path);
             }
             List<string> lines = new List<string>();
@@ -3912,7 +3912,7 @@ namespace UsbBlockTray
         {
             WriteBlockedReason = string.Empty;
             _owner = byService ? "служба"
-                : (Program.IsAdministrator() ? "трей (администратор)" : "трей (обычный пользователь)");
+                : (Program.IsAdministrator() ? "трей (адміністратор)" : "трей (звичайний користувач)");
 
             DateTime nowLocal = DateTime.Now;
             bool gap = NeedsRebaseline(nowLocal);
@@ -3924,8 +3924,8 @@ namespace UsbBlockTray
                 !UsbJournalRights.CanWriteNow())
             {
                 WriteBlockedReason =
-                    "нет прав на запись в файл журнала - их выдаёт первый " +
-                    "запуск с правами администратора (или служба мониторинга)";
+                    "немає прав на запис у файл журналу - їх видає перший " +
+                    "запуск з правами адміністратора (або служба моніторингу)";
             }
 
             try
@@ -4379,8 +4379,8 @@ namespace UsbBlockTray
                 if (events.Count > 0)
                 {
                     UsbJournal.Write(UsbJournal.KindNote,
-                        "Наблюдение за томом " + v.DriveLetter + ": снимок обновлён после " +
-                        "перерыва, изменений за время простоя не записано");
+                        "Нагляд за томом " + v.DriveLetter + ": знімок оновлено після " +
+                        "перерви, змін за час простою не записано");
                 }
                 return count;
             }
@@ -4797,7 +4797,7 @@ foreach (string path in oldFiles.Keys)
             }
             catch (Exception ex)
             {
-                LastError = "запись: " + ex.Message;
+                LastError = "запис: " + ex.Message;
                 return false;
             }
         }
@@ -4999,7 +4999,7 @@ foreach (string path in oldFiles.Keys)
                 {
                     // Основная зарегистрировалась - причина неудачи второй
                     // не должна выглядеть как отказ всей горячей клавиши.
-                    LastError = LastError + " (дополнительная не зарегистрирована)";
+                    LastError = LastError + " (додаткову не зареєстровано)";
                 }
             }
             return any;
@@ -5011,14 +5011,14 @@ foreach (string path in oldFiles.Keys)
             uint mods, vk;
             if (!TryParse(text, out mods, out vk))
             {
-                LastError = "неверно сохранённая комбинация: " + text;
+                LastError = "невірно збережена комбінація: " + text;
                 return false;
             }
             try
             {
                 if (RegisterHotKey(hwnd, id, mods, vk)) return true;
                 int err = Marshal.GetLastWin32Error();
-                LastError = "комбинация " + text + " занята другой программой (код " +
+                LastError = "комбінація " + text + " зайнята іншою програмою (код " +
                     err.ToString(CultureInfo.InvariantCulture) + ")";
             }
             catch (Exception ex)
@@ -5070,7 +5070,7 @@ foreach (string path in oldFiles.Keys)
         {
             _value = current;
 
-            this.Text = "Комбинация клавиш для журнала";
+            this.Text = "Комбінація клавіш для журналу";
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
             this.MinimizeBox = false;
@@ -5081,7 +5081,7 @@ foreach (string path in oldFiles.Keys)
             this.Font = SystemFonts.MessageBoxFont;
 
             Label title = new Label();
-            title.Text = "Комбинация, которой открывается журнал подключений";
+            title.Text = "Комбінація, якою відкривається журнал підключень";
             title.AutoSize = true;
             title.Location = new Point(12, 12);
             this.Controls.Add(title);
@@ -5095,7 +5095,7 @@ foreach (string path in oldFiles.Keys)
             this.Controls.Add(_box);
 
             _capture = new Button();
-            _capture.Text = "Задать...";
+            _capture.Text = "Задати...";
             _capture.Location = new Point(12, 70);
             _capture.Size = new Size(140, 27);
             _capture.Click += delegate { StartCapture(); };
@@ -5116,7 +5116,7 @@ foreach (string path in oldFiles.Keys)
             this.AcceptButton = ok;
 
             Button cancel = new Button();
-            cancel.Text = "Отмена";
+            cancel.Text = "Скасувати";
             cancel.DialogResult = DialogResult.Cancel;
             cancel.Location = new Point(380, 163);
             cancel.Size = new Size(78, 27);
@@ -5131,21 +5131,21 @@ foreach (string path in oldFiles.Keys)
             if (string.IsNullOrEmpty(_value))
             {
                 _box.Text = "не задана";
-                _hint.Text = "Нажмите «Задать...» и наберите сочетание, например Ctrl+Alt+U.";
+                _hint.Text = "Натисніть «Задати...» і наберіть комбінацію, наприклад Ctrl+Alt+U.";
             }
             else
             {
                 _box.Text = _value;
-                _hint.Text = "Нажмите «Задать...», чтобы заменить сочетание.";
+                _hint.Text = "Натисніть «Задати...», щоб замінити комбінацію.";
             }
         }
 
         private void StartCapture()
         {
             _capturing = true;
-            _box.Text = "нажмите клавиши...";
-            _hint.Text = "Нужно основное поле и хотя бы один из Ctrl, Alt, Shift. " +
-                "Клавиша Win не используется. Esc - отмена захвата.";
+            _box.Text = "натисніть клавіші...";
+            _hint.Text = "Потрібне основне поле і хоча б один із Ctrl, Alt, Shift. " +
+                "Клавіша Win не використовується. Esc - скасування захоплення.";
             _capture.Enabled = false;
             _box.Focus();
         }
@@ -5207,28 +5207,28 @@ foreach (string path in oldFiles.Keys)
             // поэтому состояние самих клавиш спрашиваем напрямую.
             if (WinHeld())
             {
-                _hint.Text = "Клавиша Win в сочетании для журнала не используется - " +
-                    "отпустите её и наберите сочетание снова.";
+                _hint.Text = "Клавіша Win у комбінації для журналу не використовується - " +
+                    "відпустіть її і наберіть комбінацію ще раз.";
                 return;
             }
 
             bool bareModifier = HotkeyStore.IsModifierKey(code);
             if (bareModifier)
             {
-                _hint.Text = "Добавьте основную клавишу (например Ctrl+Alt+U).";
+                _hint.Text = "Додайте основну клавішу (наприклад Ctrl+Alt+U).";
                 return;
             }
             if (mods == 0)
             {
-                _hint.Text = "Нужен хотя бы один из Ctrl, Alt, Shift - иначе " +
-                    "сочетание будет перехватывать обычный набор текста.";
+                _hint.Text = "Потрібен хоча б один із Ctrl, Alt, Shift - інакше " +
+                    "комбінація перехоплюватиме звичайний набір тексту.";
                 return;
             }
             if (!Enum.IsDefined(typeof(Keys), code) ||
                 !HotkeyStore.IsMainKey(code, unchecked((uint)code)))
             {
-                _hint.Text = "Эта клавиша не подходит как основная (Ctrl, Alt " +
-                    "и Shift задаются как добавка). Выберите обычную клавишу.";
+                _hint.Text = "Ця клавіша не підходить як основна (Ctrl, Alt " +
+                    "і Shift задаються як додаток). Виберіть звичайну клавішу.";
                 return;
             }
 
@@ -5404,7 +5404,7 @@ foreach (string path in oldFiles.Keys)
         {
             _devices = devices;
 
-            this.Text = "Добавить устройство";
+            this.Text = "Додати пристрій";
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
@@ -5419,7 +5419,7 @@ foreach (string path in oldFiles.Keys)
             MarkAllowed();
 
             Label lblSel = new Label();
-            lblSel.Text = "Выберите USB-накопитель:";
+            lblSel.Text = "Виберіть USB-накопичувач:";
             lblSel.AutoSize = true;
             lblSel.Location = new Point(12, 10);
 
@@ -5431,7 +5431,7 @@ foreach (string path in oldFiles.Keys)
             {
                 // Метка тома перед названием модели; DEV ID и SN в списке
                 // больше не показываются.
-                string label = string.IsNullOrEmpty(sd.Model) ? "(без имени)" : sd.Model;
+                string label = string.IsNullOrEmpty(sd.Model) ? "(без імені)" : sd.Model;
                 if (!string.IsNullOrEmpty(sd.Label))
                     label = sd.Label + "  " + label;
                 _cbDevice.Items.Add(label);
@@ -5467,14 +5467,14 @@ foreach (string path in oldFiles.Keys)
             _tbModel.SetBounds(12, 210, 516, 24);
 
             _ok = new Button();
-            _ok.Text = "Добавить";
+            _ok.Text = "Додати";
             _ok.Size = new Size(110, 28);
             _ok.Location = new Point(306, 270);
             _ok.Enabled = false;
             _ok.Click += delegate { Commit(); };
 
             Button cancel = new Button();
-            cancel.Text = "Отмена";
+            cancel.Text = "Скасувати";
             cancel.Size = new Size(110, 28);
             cancel.Location = new Point(424, 270);
             cancel.DialogResult = DialogResult.Cancel;
@@ -5554,14 +5554,14 @@ foreach (string path in oldFiles.Keys)
             int i = _cbDevice.SelectedIndex;
             if (i < 0 || i >= _devices.Count)
             {
-                MessageBox.Show("Выберите устройство из списка.",
+                MessageBox.Show("Виберіть пристрій зі списку.",
                     Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
             StorageDevice sd = _devices[i];
             if (string.IsNullOrEmpty(sd.UsbId))
             {
-                MessageBox.Show("У устройства нет USB-идентификатора - его нельзя добавить.",
+                MessageBox.Show("У пристрою немає USB-ідентифікатора - його не можна додати.",
                     Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -5584,7 +5584,7 @@ foreach (string path in oldFiles.Keys)
         {
             _entries = entries;
 
-            this.Text = "Удалить устройство из whitelist";
+            this.Text = "Видалити пристрій із WHITELIST";
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
@@ -5595,8 +5595,8 @@ foreach (string path in oldFiles.Keys)
             this.AutoScaleMode = AutoScaleMode.Font;
 
             Label lbl = new Label();
-            lbl.Text = "Выберите устройство для удаления из whitelist:\n" +
-                       "после удаления его накопитель будет заблокирован.";
+            lbl.Text = "Виберіть пристрій для видалення з WHITELIST:\n" +
+                       "після видалення його накопичувач буде заблоковано.";
             lbl.AutoSize = false;
             lbl.Size = new Size(596, 36);
             lbl.Location = new Point(12, 10);
@@ -5611,14 +5611,14 @@ foreach (string path in oldFiles.Keys)
                 _list.Items.Add(Format(e));
 
             Button ok = new Button();
-            ok.Text = "Удалить";
+            ok.Text = "Видалити";
             ok.Size = new Size(110, 28);
             ok.Location = new Point(380, 360);
             ok.Enabled = _entries.Count > 0;
             ok.Click += delegate { Commit(); };
 
             Button cancel = new Button();
-            cancel.Text = "Отмена";
+            cancel.Text = "Скасувати";
             cancel.Size = new Size(110, 28);
             cancel.Location = new Point(498, 360);
             cancel.DialogResult = DialogResult.Cancel;
@@ -5634,9 +5634,9 @@ foreach (string path in oldFiles.Keys)
         private static string Format(DeviceEntry e)
         {
             StringBuilder sb = new StringBuilder();
-            sb.Append(string.IsNullOrEmpty(e.Name) ? "(без имени)" : e.Name);
+            sb.Append(string.IsNullOrEmpty(e.Name) ? "(без імені)" : e.Name);
             sb.Append("   USB ID: " +
-                (string.IsNullOrEmpty(e.UsbId) ? "(нет)" : e.UsbId));
+                (string.IsNullOrEmpty(e.UsbId) ? "(немає)" : e.UsbId));
             if (!string.IsNullOrEmpty(e.Serial))
                 sb.Append("   SN: " + e.Serial);
             if (!string.IsNullOrEmpty(e.DiskId))
@@ -5649,7 +5649,7 @@ foreach (string path in oldFiles.Keys)
             int i = _list.SelectedIndex;
             if (i < 0 || i >= _entries.Count)
             {
-                MessageBox.Show("Выберите устройство из списка.",
+                MessageBox.Show("Виберіть пристрій зі списку.",
                     Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -5705,7 +5705,7 @@ foreach (string path in oldFiles.Keys)
 
             Label lblPass = new Label();
             lblPass.Text = string.IsNullOrEmpty(fieldLabel)
-                ? (confirm ? "Новый пароль:" : "Пароль:")
+                ? (confirm ? "Новий пароль:" : "Пароль:")
                 : fieldLabel;
             lblPass.AutoSize = true;
             lblPass.Location = new Point(12, topPass - 20);
@@ -5715,7 +5715,7 @@ foreach (string path in oldFiles.Keys)
             _tbPass.SetBounds(12, topPass, 446, 24);
 
             Label lblRepeat = new Label();
-            lblRepeat.Text = "Повторите пароль:";
+            lblRepeat.Text = "Повторіть пароль:";
             lblRepeat.AutoSize = true;
             lblRepeat.Visible = confirm;
             lblRepeat.Location = new Point(12, topRepeat - 20);
@@ -5732,7 +5732,7 @@ foreach (string path in oldFiles.Keys)
             ok.Click += delegate { Commit(); };
 
             Button cancel = new Button();
-            cancel.Text = "Отмена";
+            cancel.Text = "Скасувати";
             cancel.Size = new Size(110, 28);
             cancel.Location = new Point(358, topButtons);
             cancel.DialogResult = DialogResult.Cancel;
@@ -5755,7 +5755,7 @@ foreach (string path in oldFiles.Keys)
             string pass = _tbPass.Text ?? string.Empty;
             if (pass.Length == 0)
             {
-                MessageBox.Show("Введите пароль.", Program.Title,
+                MessageBox.Show("Введіть пароль.", Program.Title,
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                 _tbPass.Focus();
                 return;
@@ -5772,7 +5772,7 @@ foreach (string path in oldFiles.Keys)
                 }
                 if (!string.Equals(pass, _tbRepeat.Text ?? string.Empty, StringComparison.Ordinal))
                 {
-                    MessageBox.Show("Пароли не совпадают.", Program.Title,
+                    MessageBox.Show("Паролі не збігаються.", Program.Title,
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
                     _tbRepeat.Focus();
                     _tbRepeat.SelectAll();
@@ -5793,7 +5793,7 @@ foreach (string path in oldFiles.Keys)
             Dictionary<string, UsbVolume> connected,
             Dictionary<string, string> volumeLabels)
         {
-            this.Text = "Whitelist - разрешённые USB-накопители";
+            this.Text = "WHITELIST - дозволені USB-накопичувачі";
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
@@ -5804,7 +5804,7 @@ foreach (string path in oldFiles.Keys)
             this.AutoScaleMode = AutoScaleMode.Font;
 
             Label lbl = new Label();
-            lbl.Text = "Разрешённых устройств: " +
+            lbl.Text = "Дозволених пристроїв: " +
                 entries.Count.ToString(CultureInfo.InvariantCulture);
             lbl.AutoSize = true;
             lbl.Location = new Point(12, 10);
@@ -5818,7 +5818,7 @@ foreach (string path in oldFiles.Keys)
                 lb.Items.Add(FormatEntry(e, connected, volumeLabels));
 
             Button close = new Button();
-            close.Text = "Закрыть";
+            close.Text = "Закрити";
             close.Size = new Size(110, 28);
             close.Location = new Point(538, 420);
             close.DialogResult = DialogResult.OK;
@@ -5848,17 +5848,17 @@ foreach (string path in oldFiles.Keys)
                 connected.TryGetValue(key, out v) &&
                 volumeLabels.TryGetValue(v.DriveLetter, out label))
             {
-                label = string.IsNullOrEmpty(label) ? "(без метки)" : label;
+                label = string.IsNullOrEmpty(label) ? "(без мітки)" : label;
                 model = string.IsNullOrEmpty(v.Model) ? null : v.Model;
             }
             if (label == null)
-                label = string.IsNullOrEmpty(e.Name) ? "(не подключено)" : e.Name;
+                label = string.IsNullOrEmpty(e.Name) ? "(не підключено)" : e.Name;
 
-            sb.Append("Метка тома: \"" + label + "\"");
-            sb.Append("\r\nМодель накопителя: " +
+            sb.Append("Мітка тому: \"" + label + "\"");
+            sb.Append("\r\nМодель накопичувача: " +
                 (string.IsNullOrEmpty(model) ? ReadableModel(e.DiskId) : model));
             if (e.AddedAt != default(DateTime))
-                sb.Append("\r\nДобавлен: " +
+                sb.Append("\r\nДодано: " +
                     e.AddedAt.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture));
 
             return sb.ToString();
@@ -5869,7 +5869,7 @@ foreach (string path in oldFiles.Keys)
         //   "USBSTOR\DiskJetFlashTranscend_8GB___1100"        ->  "JetFlashTranscend 8GB"
         private static string ReadableModel(string diskId)
         {
-            if (string.IsNullOrEmpty(diskId)) return "(нет)";
+            if (string.IsNullOrEmpty(diskId)) return "(немає)";
             const string prefix = "USBSTOR\\Disk";
             string m = diskId.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
                 ? diskId.Substring(prefix.Length) : diskId;
@@ -5929,7 +5929,7 @@ foreach (string path in oldFiles.Keys)
 
         public JournalViewForm()
         {
-            this.Text = "Журнал USB-блокировки";
+            this.Text = "Журнал USB-блокування";
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.Sizable;
             this.MinimizeBox = false;
@@ -5945,35 +5945,35 @@ foreach (string path in oldFiles.Keys)
             _devices = MakeBox();
             _files = MakeBox();
             _notes = MakeBox();
-            _tabs.TabPages.Add(MakePage("Подключения накопителей", _devices));
-            _tabs.TabPages.Add(MakePage("Файлы на накопителях", _files));
-            _tabs.TabPages.Add(MakePage("Служебные записи", _notes));
+            _tabs.TabPages.Add(MakePage("Підключення накопичувачів", _devices));
+            _tabs.TabPages.Add(MakePage("Файли на накопичувачах", _files));
+            _tabs.TabPages.Add(MakePage("Службові записи", _notes));
 
             _status = new Label();
             _status.SetBounds(12, 574, 434, 22);
             this.Controls.Add(_status);
 
             _open = new Button();
-            _open.Text = "Открыть файл...";
+            _open.Text = "Відкрити файл...";
             _open.SetBounds(452, 572, 124, 27);
             _open.Click += delegate { OpenExternal(); };
             this.Controls.Add(_open);
 
             _live = new Button();
-            _live.Text = "К журналу";
+            _live.Text = "До журналу";
             _live.SetBounds(584, 572, 116, 27);
             _live.Enabled = false;
             _live.Click += delegate { _external = null; Fill(); };
             this.Controls.Add(_live);
 
             Button refresh = new Button();
-            refresh.Text = "Обновить";
+            refresh.Text = "Оновити";
             refresh.SetBounds(708, 572, 108, 27);
             refresh.Click += delegate { Fill(); };
             this.Controls.Add(refresh);
 
             Button copy = new Button();
-            copy.Text = "Копировать";
+            copy.Text = "Копіювати";
             copy.SetBounds(824, 572, 116, 27);
             copy.Click += delegate { CopyCurrent(); };
             this.Controls.Add(copy);
@@ -6047,8 +6047,8 @@ foreach (string path in oldFiles.Keys)
 
                 _live.Enabled = external;
                 this.Text = external
-                    ? "Журнал USB-блокировки - " + Path.GetFileName(_external)
-                    : "Журнал USB-блокировки";
+                    ? "Журнал USB-блокування - " + Path.GetFileName(_external)
+                    : "Журнал USB-блокування";
 
                 long bytes = external
                     ? new FileInfo(_external).Length
@@ -6058,30 +6058,30 @@ foreach (string path in oldFiles.Keys)
                     : UsbJournal.TotalRecordCount();
                 _status.Text =
                     (external
-                        ? "ОТКРЫТ ФАЙЛ: " + _external + "   "
+                        ? "ВІДКРИТО ФАЙЛ: " + _external + "   "
                         : string.Empty) +
                     (external || JournalSettings.IsEnabled()
                         ? string.Empty
-                        : "ВЕДЕНИЕ ЖУРНАЛА ВЫКЛЮЧЕНО (нет установленной службы) " +
-                          "- показаны ранее записанные записи.   ") +
+                        : "ВЕДЕННЯ ЖУРНАЛУ ВИМКНЕНО (немає встановленої служби) " +
+                          "- показано раніше записані записи.   ") +
                     (external || JournalSettings.IsFilesEnabled()
                         ? string.Empty
-                        : "Журнал копирования выключен (меню трея, пункт J) - " +
-                          "файловые записи не обновляются.   ") +
-                    "Записей: " +
+                        : "Журнал копіювання вимкнено (меню трея, пункт J) - " +
+                          "файлові записи не оновлюються.   ") +
+                    "Записів: " +
                     total.ToString(CultureInfo.InvariantCulture) +
-                    "   Размер: " + bytes.ToString(CultureInfo.InvariantCulture) + " байт" +
-                    "   Показано: устройств " + shownDev.ToString(CultureInfo.InvariantCulture) +
-                    " / файлов " + shownFiles.ToString(CultureInfo.InvariantCulture) +
-                    (shownNotes > 0 ? " / служебных " + shownNotes.ToString(CultureInfo.InvariantCulture) : string.Empty) +
-                    "   Записи старше порога показа не показаны.";
+                    "   Розмір: " + bytes.ToString(CultureInfo.InvariantCulture) + " байт" +
+                    "   Показано: пристроїв " + shownDev.ToString(CultureInfo.InvariantCulture) +
+                    " / файлів " + shownFiles.ToString(CultureInfo.InvariantCulture) +
+                    (shownNotes > 0 ? " / службових " + shownNotes.ToString(CultureInfo.InvariantCulture) : string.Empty) +
+                    "   Записи старші за поріг показу не показані.";
             }
             catch (Exception ex)
             {
                 _live.Enabled = _external != null;
                 _status.Text = (_external != null
-                    ? "Не удалось прочитать файл " + _external + ": "
-                    : "Не удалось прочитать журнал: ") + ex.Message;
+                    ? "Не вдалося прочитати файл " + _external + ": "
+                    : "Не вдалося прочитати журнал: ") + ex.Message;
             }
         }
 
@@ -6091,9 +6091,9 @@ foreach (string path in oldFiles.Keys)
         {
             using (OpenFileDialog dialog = new OpenFileDialog())
             {
-                dialog.Title = "Открыть файл журнала";
-                dialog.Filter = "Файлы журнала (journal*.dat)|journal*.dat|" +
-                    "Все файлы (*.*)|*.*";
+                dialog.Title = "Відкрити файл журналу";
+                dialog.Filter = "Файли журналу (journal*.dat)|journal*.dat|" +
+                    "Усі файли (*.*)|*.*";
                 dialog.CheckFileExists = true;
                 dialog.Multiselect = false;
                 try
@@ -6170,14 +6170,14 @@ foreach (string path in oldFiles.Keys)
 
         private static string KindText(string kind)
         {
-            if (kind == UsbJournal.KindDeviceAdded) return "подключён";
-            if (kind == UsbJournal.KindDeviceRemoved) return "отключён";
-            if (kind == UsbJournal.KindDeviceFound) return "обнаружен";
-            if (kind == UsbJournal.KindFileAdded) return "скопирован";
-            if (kind == UsbJournal.KindFileChanged) return "изменён";
-            if (kind == UsbJournal.KindFileRemoved) return "удалён";
-            if (kind == UsbJournal.KindFileRenamed) return "перенесён";
-            if (kind == UsbJournal.KindNote) return "служебное";
+            if (kind == UsbJournal.KindDeviceAdded) return "підключено";
+            if (kind == UsbJournal.KindDeviceRemoved) return "відключено";
+            if (kind == UsbJournal.KindDeviceFound) return "виявлено";
+            if (kind == UsbJournal.KindFileAdded) return "скопійовано";
+            if (kind == UsbJournal.KindFileChanged) return "змінено";
+            if (kind == UsbJournal.KindFileRemoved) return "видалено";
+            if (kind == UsbJournal.KindFileRenamed) return "перенесено";
+            if (kind == UsbJournal.KindNote) return "службове";
             return kind;
         }
     }
@@ -6270,7 +6270,7 @@ foreach (string path in oldFiles.Keys)
             string t = CreateOne(TaskName, "--logon");
             if (t != null) errors.Add("задача трея: " + t);
             string n = CreateOne(NotifyTaskName, "--notify");
-            if (n != null) errors.Add("задача уведомлений: " + n);
+            if (n != null) errors.Add("задача сповіщень: " + n);
             if (errors.Count == 0) return null;
             return string.Join("\n", errors.ToArray());
         }
@@ -6335,7 +6335,7 @@ foreach (string path in oldFiles.Keys)
         {
             Type t = Type.GetTypeFromProgID("Schedule.Service");
             if (t == null)
-                throw new InvalidOperationException("COM-тип Schedule.Service не найден");
+                throw new InvalidOperationException("COM-тип Schedule.Service не знайдено");
             object svc = Activator.CreateInstance(t);
             t.InvokeMember("Connect", BindingFlags.InvokeMethod, null, svc, null);
             return svc;
@@ -6406,7 +6406,7 @@ foreach (string path in oldFiles.Keys)
                 "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n" +
                 "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n" +
                 "  <RegistrationInfo>\r\n" +
-                "    <Description>USB-блокировка: значок в трее и уведомления о блокировках для всех пользователей</Description>\r\n" +
+                "    <Description>USB-блокування: значок у треї та сповіщення про блокування для всіх користувачів</Description>\r\n" +
                 "  </RegistrationInfo>\r\n" +
                 "  <Triggers>\r\n" +
                 "    <LogonTrigger>\r\n" +
@@ -6509,7 +6509,7 @@ foreach (string path in oldFiles.Keys)
                 }
                 else if (!Program.StartJournalViewer(true))
                 {
-                    MessageBox.Show("Не удалось открыть журнал с правами администратора.",
+                    MessageBox.Show("Не вдалося відкрити журнал з правами адміністратора.",
                         Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
                 }
             }
@@ -6517,7 +6517,7 @@ foreach (string path in oldFiles.Keys)
             {
                 try
                 {
-                    MessageBox.Show("Не удалось открыть журнал: " + ex.Message,
+                    MessageBox.Show("Не вдалося відкрити журнал: " + ex.Message,
                         Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
                 }
                 catch
@@ -6550,12 +6550,12 @@ foreach (string path in oldFiles.Keys)
             if (!Program.IsAdministrator())
             {
                 ToolStripMenuItem mInfo = new ToolStripMenuItem(
-                    "Управление доступно только администраторам");
+                    "Керування доступне лише адміністраторам");
                 mInfo.Enabled = false;
                 _menu.Items.Add(mInfo);
                 _menu.Items.Add(new ToolStripSeparator());
 
-                ToolStripMenuItem mExitLimited = new ToolStripMenuItem("Выход");
+                ToolStripMenuItem mExitLimited = new ToolStripMenuItem("Вихід");
                 mExitLimited.Click += delegate { this.ExitThread(); };
                 _menu.Items.Add(mExitLimited);
 
@@ -6563,31 +6563,31 @@ foreach (string path in oldFiles.Keys)
                 return;
             }
 
-            ToolStripMenuItem mBlock = new ToolStripMenuItem("1 Заблокировать");
+            ToolStripMenuItem mBlock = new ToolStripMenuItem("1 Блокувати пристрої");
             mBlock.Click += delegate { DoBlock(); };
             _menu.Items.Add(mBlock);
 
-            ToolStripMenuItem mUnblock = new ToolStripMenuItem("2 Разблокировать");
+            ToolStripMenuItem mUnblock = new ToolStripMenuItem("2 Розблокувати пристрої");
             mUnblock.Click += delegate { DoUnblock(); };
             _menu.Items.Add(mUnblock);
 
-            ToolStripMenuItem mAdd = new ToolStripMenuItem("3 Добавить устройство");
+            ToolStripMenuItem mAdd = new ToolStripMenuItem("3 Додати пристрій");
             mAdd.Click += delegate { DoAddDevice(); };
             _menu.Items.Add(mAdd);
 
-            ToolStripMenuItem mRemove = new ToolStripMenuItem("4 Удалить устройство из whitelist...");
+            ToolStripMenuItem mRemove = new ToolStripMenuItem("4 Видалити пристрій із WHITELIST...");
             mRemove.Click += delegate { DoRemoveDevice(); };
             _menu.Items.Add(mRemove);
 
-            ToolStripMenuItem mExport = new ToolStripMenuItem("5 Экспортировать whitelist...");
+            ToolStripMenuItem mExport = new ToolStripMenuItem("5 Експортувати WHITELIST...");
             mExport.Click += delegate { DoExport(); };
             _menu.Items.Add(mExport);
 
-            ToolStripMenuItem mImport = new ToolStripMenuItem("6 Импортировать whitelist...");
+            ToolStripMenuItem mImport = new ToolStripMenuItem("6 Імпортувати WHITELIST...");
             mImport.Click += delegate { DoImport(); };
             _menu.Items.Add(mImport);
 
-            ToolStripMenuItem mView = new ToolStripMenuItem("0 Просмотр whitelist...");
+            ToolStripMenuItem mView = new ToolStripMenuItem("0 Переглянути WHITELIST...");
             mView.Click += delegate { DoViewWhitelist(); };
             _menu.Items.Add(mView);
 
@@ -6596,35 +6596,35 @@ foreach (string path in oldFiles.Keys)
             // выключается её удалением, поэтому в этом пункте его нет.
             // При включении здесь же задаётся дополнительное сочетание -
             // второе на ту же функцию, что и Ctrl+Alt+O.
-            _miJournal = new ToolStripMenuItem("J Вести журнал копирования");
+            _miJournal = new ToolStripMenuItem("J Вести журнал копіювання");
             _miJournal.Click += delegate { DoToggleJournal(); };
             _menu.Items.Add(_miJournal);
 
             _menu.Items.Add(new ToolStripSeparator());
 
-            _miSvcInstall = new ToolStripMenuItem("7 Установить службу мониторинга");
+            _miSvcInstall = new ToolStripMenuItem("7 Встановити службу");
             _miSvcInstall.Click += delegate { DoInstallService(); };
             _menu.Items.Add(_miSvcInstall);
 
-            _miSvcRemove = new ToolStripMenuItem("8 Удалить службу мониторинга");
+            _miSvcRemove = new ToolStripMenuItem("8 Видалити службу");
             _miSvcRemove.Click += delegate { DoRemoveService(); };
             _menu.Items.Add(_miSvcRemove);
 
             _menu.Items.Add(new ToolStripSeparator());
 
-            ToolStripMenuItem mUninstall = new ToolStripMenuItem("9 Удалить программу...");
+            ToolStripMenuItem mUninstall = new ToolStripMenuItem("9 Видалити застосунок...");
             mUninstall.Click += delegate { DoUninstall(); };
             _menu.Items.Add(mUninstall);
 
             _menu.Items.Add(new ToolStripSeparator());
 
-            ToolStripMenuItem mDelPass = new ToolStripMenuItem("Удалить пароль");
+            ToolStripMenuItem mDelPass = new ToolStripMenuItem("Видалити пароль");
             mDelPass.Click += delegate { DoRemovePassword(); };
             _menu.Items.Add(mDelPass);
 
             _menu.Items.Add(new ToolStripSeparator());
 
-            ToolStripMenuItem mExit = new ToolStripMenuItem("Выход");
+            ToolStripMenuItem mExit = new ToolStripMenuItem("Вихід");
             mExit.Click += delegate { this.ExitThread(); };
             _menu.Items.Add(mExit);
 
@@ -6651,9 +6651,9 @@ foreach (string path in oldFiles.Keys)
             bool on = JournalSettings.IsFilesEnabled();
             string extra = HotkeyStore.GetText2();
             _miJournal.Checked = on;
-            _miJournal.Text = "J Вести журнал копирования " +
-                (on ? "(ВКЛ" + (string.IsNullOrEmpty(extra) ? "" : ", " + extra) + ")"
-                     : "(выключено)");
+            _miJournal.Text = "J Вести журнал копіювання " +
+                (on ? "(увімкнено" + (string.IsNullOrEmpty(extra) ? "" : ", " + extra) + ")"
+                     : "(вимкнено)");
         }
 
         private void RefreshStatus()
@@ -6678,14 +6678,14 @@ foreach (string path in oldFiles.Keys)
 
         private string StatusText()
         {
-            string s = "Статус: блокировка ";
-            s += _blocked ? "включена" : "выключена";
+            string s = "СТАТУС: ";
+            s += _blocked ? "БЛОКУВАННЯ УВІМКНЕНО" : "БЛОКУВАННЯ ВИМКНЕНО";
             // Для не-администратора whitelist.dat недоступен (ACL/DPAPI) -
             // счётчик не показываем.
             if (Program.IsAdministrator())
             {
                 List<DeviceEntry> wl = UsbMonitor.GetWhitelist();
-                s += " | whitelist: " + wl.Count.ToString(CultureInfo.InvariantCulture);
+                s += " | ДОЗВОЛЕНО: " + wl.Count.ToString(CultureInfo.InvariantCulture);
             }
             return s;
         }
@@ -6703,12 +6703,12 @@ foreach (string path in oldFiles.Keys)
                 RunScan();
                 RefreshStatus();
                 _icon.ShowBalloonTip(3000, Program.Title,
-                    "Блокировка включена. Посторонние USB-накопители будут оставаться без буквы диска.",
+                    "Блокування увімкнено. Чужі USB-накопичувачі залишатимуться без літери диска.",
                     ToolTipIcon.Info);
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Ошибка при блокировке:\n" + ex.Message,
+                MessageBox.Show("Помилка блокування:\n" + ex.Message,
                     Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
@@ -6729,13 +6729,13 @@ foreach (string path in oldFiles.Keys)
                 RunScan();
                 RefreshStatus();
                 _icon.ShowBalloonTip(3000, Program.Title,
-                    "Блокировка выключена. Томов восстановлено: " + remounted +
-                    ". Все USB-накопители доступны.",
+                    "Блокування вимкнено. Томів відновлено: " + remounted +
+                    ". Усі USB-накопичувачі доступні.",
                     ToolTipIcon.Info);
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Ошибка при разблокировке:\n" + ex.Message,
+                MessageBox.Show("Помилка розблокування:\n" + ex.Message,
                     Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
@@ -6753,8 +6753,8 @@ foreach (string path in oldFiles.Keys)
             List<StorageDevice> devices = BuildAddDeviceList();
             if (devices.Count == 0)
             {
-                MessageBox.Show("Нет USB-накопителей.\n" +
-                                "Подключите накопитель и повторите.",
+                MessageBox.Show("Немає USB-накопичувачів.\n" +
+                                "Підключіть накопичувач і повторіть.",
                     Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -6794,7 +6794,7 @@ foreach (string path in oldFiles.Keys)
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show("Не удалось сохранить whitelist:\n" + ex.Message,
+                    MessageBox.Show("Не вдалося зберегти whitelist:\n" + ex.Message,
                         Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
@@ -6821,9 +6821,9 @@ foreach (string path in oldFiles.Keys)
                 }
 
                 RefreshStatus();
-                MessageBox.Show("Добавлено устройств: " + added.Count.ToString(CultureInfo.InvariantCulture) + "\n" +
-                                "Разрешено к монтированию: " + mounted.ToString(CultureInfo.InvariantCulture) + "\n" +
-                                "Накопитель разрешён и получит букву диска автоматически.",
+                MessageBox.Show("Додано пристроїв: " + added.Count.ToString(CultureInfo.InvariantCulture) + "\n" +
+                                "Дозволено до монтування: " + mounted.ToString(CultureInfo.InvariantCulture) + "\n" +
+                                "Накопичувач дозволено і він отримає літеру диска автоматично.",
                     Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
         }
@@ -6833,41 +6833,41 @@ foreach (string path in oldFiles.Keys)
         private static string DuplicateMessage(DeviceEntry added, DeviceEntry exists)
         {
             StringBuilder sb = new StringBuilder();
-            sb.AppendLine("Этот накопитель уже есть в whitelist - повторно добавлять не нужно.");
+            sb.AppendLine("Цей накопичувач уже є в whitelist - повторно додавати не потрібно.");
             sb.AppendLine();
-            sb.AppendLine("В whitelist уже записано:");
+            sb.AppendLine("У whitelist уже записано:");
 
-            string name = string.IsNullOrEmpty(exists.Name) ? "(без имени)" : exists.Name;
+            string name = string.IsNullOrEmpty(exists.Name) ? "(без імені)" : exists.Name;
             sb.AppendLine("  Ім'я пристрою: " + name);
             if (!string.IsNullOrEmpty(exists.UsbId))
                 sb.AppendLine("  Тип пристрою (ID): " + exists.UsbId);
             if (!string.IsNullOrEmpty(exists.DiskId))
                 sb.AppendLine("  Модель пристрою: " + exists.DiskId);
             if (!string.IsNullOrEmpty(exists.Serial))
-                sb.AppendLine("  Серийный номер: " + exists.Serial);
+                sb.AppendLine("  Серійний номер: " + exists.Serial);
             else
-                sb.AppendLine("  Серийный номер: не определён (запись разрешает всю модель " +
+                sb.AppendLine("  Серійний номер: не визначено (запис дозволяє всю модель " +
                               (string.IsNullOrEmpty(exists.UsbId) ? "" : exists.UsbId) + ")");
             if (exists.AddedAt != default(DateTime))
-                sb.AppendLine("  Добавлен: " + exists.AddedAt.ToString("yyyy-MM-dd HH:mm"));
+                sb.AppendLine("  Додано: " + exists.AddedAt.ToString("yyyy-MM-dd HH:mm"));
 
             if (added != null && !string.IsNullOrEmpty(added.Serial) &&
                 !string.Equals(WhitelistRules.NormSerial(added.Serial),
                                WhitelistRules.NormSerial(exists.Serial), StringComparison.OrdinalIgnoreCase))
             {
                 sb.AppendLine();
-                sb.AppendLine("Внимание: серийные номера различаются (" +
-                              (string.IsNullOrEmpty(added.Serial) ? "не определён" : added.Serial) +
-                              " и " + (string.IsNullOrEmpty(exists.Serial) ? "не определён" : exists.Serial) +
-                              "), а совпал HardwareID диска или модель USB. Если это ДРУГОЙ накопитель - " +
-                              "сначала удалите старую запись (пункт «4 Удалить устройство из whitelist»), " +
-                              "после чего добавьте этот заново.");
+                sb.AppendLine("Увага: серійні номери відрізняються (" +
+                              (string.IsNullOrEmpty(added.Serial) ? "не визначено" : added.Serial) +
+                              " і " + (string.IsNullOrEmpty(exists.Serial) ? "не визначено" : exists.Serial) +
+                              "), а збіглися HardwareID диска або модель USB. Якщо це ІНШИЙ накопичувач - " +
+                              "спочатку видаліть старий запис (пункт «4 Видалити пристрій із WHITELIST»), " +
+                              "після чого додайте цей заново.");
             }
             else
             {
                 sb.AppendLine();
-                sb.AppendLine("Накопитель уже разрешён. Чтобы внести изменения, сначала удалите " +
-                              "старую запись (пункт «4 Удалить устройство из whitelist»).");
+                sb.AppendLine("Накопичувач уже дозволено. Щоб внести зміни, спочатку видаліть " +
+                              "старий запис (пункт «4 Видалити пристрій із WHITELIST»).");
             }
             return sb.ToString();
         }
@@ -6901,7 +6901,7 @@ foreach (string path in oldFiles.Keys)
                     ? UsbQuery.FindUsbIdBySerial(rec.Serial)
                     : rec.UsbId;
                 sd.BestDiskId = UsbQuery.FindDiskIdBySerial(rec.Serial);
-                sd.Model = "(заблокирован)";
+                sd.Model = "(заблоковано)";
                 devices.Add(sd);
             }
 
@@ -6949,7 +6949,7 @@ foreach (string path in oldFiles.Keys)
                 List<DeviceEntry> wl = UsbMonitor.GetWhitelist();
                 if (wl.Count == 0)
                 {
-                    MessageBox.Show("Whitelist пуст - удалять нечего.",
+                    MessageBox.Show("WHITELIST порожній - видаляти нічого.",
                         Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
@@ -6966,7 +6966,7 @@ foreach (string path in oldFiles.Keys)
                 foreach (DeviceEntry e in selected)
                     q.AppendLine("* " + DescribeEntry(e));
                 if (MessageBox.Show(
-                        "Удалить из whitelist и заблокировать?\n\n" + q.ToString(),
+                        "Видалити з WHITELIST і заблокувати?\n\n" + q.ToString(),
                         Program.Title, MessageBoxButtons.YesNo, MessageBoxIcon.Warning)
                     != DialogResult.Yes)
                     return;
@@ -6987,7 +6987,7 @@ foreach (string path in oldFiles.Keys)
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show("Не удалось сохранить whitelist:\n" + ex.Message,
+                    MessageBox.Show("Не вдалося зберегти whitelist:\n" + ex.Message,
                         Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
@@ -7015,20 +7015,20 @@ foreach (string path in oldFiles.Keys)
                 RefreshStatus();
 
                 MessageBox.Show(
-                    "Удалено из whitelist: " +
+                    "Видалено з WHITELIST: " +
                     selected.Count.ToString(CultureInfo.InvariantCulture) + "\n" +
-                    "Заблокировано сейчас: " +
+                    "Заблоковано зараз: " +
                     blockedNow.ToString(CultureInfo.InvariantCulture) + "\n\n" +
                     (_blocked
-                        ? "Устройство больше не разрешено и будет блокироваться."
-                        : "Внимание: общая блокировка ВЫКЛЮЧЕНА.\n" +
-                          "Подключённый накопитель размонтирован, но чтобы он\n" +
-                          "блокировался и в дальнейшем, включите пункт «1 Заблокировать»."),
+                        ? "Пристрій більше не дозволено і блокуватиметься."
+                        : "Увага: загальне блокування ВИМКНЕНО.\n" +
+                          "Підключений накопичувач розмонтовано, але щоб він\n" +
+                          "блокувався і надалі, увімкніть пункт «1 Блокувати пристрої»."),
                     Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Ошибка при удалении устройства:\n" + ex.Message,
+                MessageBox.Show("Помилка видалення пристрою:\n" + ex.Message,
                     Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
@@ -7049,7 +7049,7 @@ foreach (string path in oldFiles.Keys)
 
         private static string DescribeEntry(DeviceEntry e)
         {
-            string s = string.IsNullOrEmpty(e.Name) ? "(без имени)" : e.Name;
+            string s = string.IsNullOrEmpty(e.Name) ? "(без імені)" : e.Name;
             if (!string.IsNullOrEmpty(e.UsbId)) s += "  " + e.UsbId;
             if (!string.IsNullOrEmpty(e.Serial)) s += "  SN=" + e.Serial;
             return s;
@@ -7064,8 +7064,8 @@ foreach (string path in oldFiles.Keys)
 
             using (SaveFileDialog dlg = new SaveFileDialog())
             {
-                dlg.Title = "Экспорт whitelist (перенос на другой компьютер)";
-                dlg.Filter = "UsbBlock whitelist (*.wlb)|*.wlb|Все файлы (*.*)|*.*";
+                dlg.Title = "Експорт WHITELIST (перенос на інший комп'ютер)";
+                dlg.Filter = "UsbBlock whitelist (*.wlb)|*.wlb|Усі файли (*.*)|*.*";
                 dlg.FileName = "usb_whitelist.wlb";
                 dlg.DefaultExt = "wlb";
                 if (dlg.ShowDialog() != DialogResult.OK) return;
@@ -7075,13 +7075,13 @@ foreach (string path in oldFiles.Keys)
                     PortableWhitelist.Export(
                         UsbMonitor.GetWhitelist(), dlg.FileName);
                     MessageBox.Show(
-                        "Whitelist экспортирован:\n" + dlg.FileName +
-                        "\n\nПеренесите .wlb на другой компьютер и выберите «Импортировать whitelist».",
+                        "WHITELIST експортовано:\n" + dlg.FileName +
+                        "\n\nПеренесіть .wlb на інший комп'ютер і виберіть «Імпортувати WHITELIST».",
                         Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show("Ошибка экспорта:\n" + ex.Message,
+                    MessageBox.Show("Помилка експорту:\n" + ex.Message,
                         Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
@@ -7097,8 +7097,8 @@ foreach (string path in oldFiles.Keys)
 
             using (OpenFileDialog dlg = new OpenFileDialog())
             {
-                dlg.Title = "Импорт whitelist";
-                dlg.Filter = "UsbBlock whitelist (*.wlb)|*.wlb|Все файлы (*.*)|*.*";
+                dlg.Title = "Імпорт WHITELIST";
+                dlg.Filter = "UsbBlock whitelist (*.wlb)|*.wlb|Усі файли (*.*)|*.*";
                 if (dlg.ShowDialog() != DialogResult.OK) return;
 
                 List<DeviceEntry> raw;
@@ -7108,7 +7108,7 @@ foreach (string path in oldFiles.Keys)
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show("Не удалось прочитать файл:\n" + ex.Message,
+                    MessageBox.Show("Не вдалося прочитати файл:\n" + ex.Message,
                         Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
@@ -7120,7 +7120,7 @@ foreach (string path in oldFiles.Keys)
                 List<DeviceEntry> imported = WhitelistRules.Dedupe(raw, out dupInFile);
                 if (imported.Count == 0)
                 {
-                    MessageBox.Show("Файл не содержит ни одного устройства - импорт отменён.",
+                    MessageBox.Show("Файл не містить жодного пристрою - імпорт скасовано.",
                         Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
@@ -7132,23 +7132,23 @@ foreach (string path in oldFiles.Keys)
                     UsbMonitor.GetWhitelist(), out dupCurrent);
 
                 StringBuilder msg = new StringBuilder();
-                msg.AppendLine("Импортировано записей (устройств): " +
+                msg.AppendLine("Імпортовано записів (пристроїв): " +
                     imported.Count.ToString(CultureInfo.InvariantCulture) + ".");
                 if (dupInFile > 0)
-                    msg.AppendLine("Дубликатов в файле отброшено: " +
+                    msg.AppendLine("Дублікатів у файлі відкинуто: " +
                         dupInFile.ToString(CultureInfo.InvariantCulture) + ".");
                 msg.AppendLine();
-                msg.AppendLine("Текущий whitelist: " +
-                    current.Count.ToString(CultureInfo.InvariantCulture) + " записей.");
+                msg.AppendLine("Поточний whitelist: " +
+                    current.Count.ToString(CultureInfo.InvariantCulture) + " записів.");
                 if (dupCurrent > 0)
-                    msg.AppendLine("Дубликатов в текущем whitelist будет убрано: " +
+                    msg.AppendLine("Дублікатів у поточному whitelist буде прибрано: " +
                         dupCurrent.ToString(CultureInfo.InvariantCulture) + ".");
                 msg.AppendLine();
-                msg.AppendLine("Как применить импортированные данные?");
+                msg.AppendLine("Як застосувати імпортовані дані?");
                 msg.AppendLine();
-                msg.AppendLine("  «Да»     - перезаписать (заменить) текущий whitelist");
-                msg.AppendLine("  «Нет»    - добавить к текущему whitelist (объединить)");
-                msg.AppendLine("  «Отмена» - отменить");
+                msg.AppendLine("  «Так»       - перезаписати (замінити) поточний whitelist");
+                msg.AppendLine("  «Ні»        - додати до поточного whitelist (об'єднати)");
+                msg.AppendLine("  «Скасувати» - скасувати");
                 DialogResult action = MessageBox.Show(msg.ToString(), Program.Title,
                     MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
                 if (action == DialogResult.Cancel) return;
@@ -7184,25 +7184,25 @@ foreach (string path in oldFiles.Keys)
                     RefreshStatus();
                     if (action == DialogResult.Yes)
                     {
-                        MessageBox.Show("Whitelist заменён: " +
-                            result.Count.ToString(CultureInfo.InvariantCulture) + " устройств." +
+                        MessageBox.Show("WHITELIST замінено: " +
+                            result.Count.ToString(CultureInfo.InvariantCulture) + " пристроїв." +
                             DupReport(dupInFile, 0, 0),
                             Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     }
                     else
                     {
-                        MessageBox.Show("Whitelist объединён:\n" +
-                            "было " + current.Count.ToString(CultureInfo.InvariantCulture) +
-                            ", добавлено " +
+                        MessageBox.Show("WHITELIST об'єднано:\n" +
+                            "було " + current.Count.ToString(CultureInfo.InvariantCulture) +
+                            ", додано " +
                             addedCount.ToString(CultureInfo.InvariantCulture) +
                             ", стало " + result.Count.ToString(CultureInfo.InvariantCulture) +
-                            " устройств." + DupReport(dupInFile, skipped, dupCurrent),
+                            " пристроїв." + DupReport(dupInFile, skipped, dupCurrent),
                             Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     }
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show("Ошибка сохранения:\n" + ex.Message,
+                    MessageBox.Show("Помилка збереження:\n" + ex.Message,
                         Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
@@ -7217,13 +7217,13 @@ foreach (string path in oldFiles.Keys)
             StringBuilder sb = new StringBuilder();
             sb.AppendLine();
             if (inFile > 0)
-                sb.AppendLine("Дубликатов в файле отброшено: " +
+                sb.AppendLine("Дублікатів у файлі відкинуто: " +
                     inFile.ToString(CultureInfo.InvariantCulture) + ".");
             if (already > 0)
-                sb.AppendLine("Пропущено (накопитель уже был в whitelist): " +
+                sb.AppendLine("Пропущено (накопичувач уже був у whitelist): " +
                     already.ToString(CultureInfo.InvariantCulture) + ".");
             if (inCurrent > 0)
-                sb.AppendLine("Дубликатов в прежнем whitelist убрано: " +
+                sb.AppendLine("Дублікатів у попередньому whitelist прибрано: " +
                     inCurrent.ToString(CultureInfo.InvariantCulture) + ".");
             return sb.ToString();
         }
@@ -7263,7 +7263,7 @@ foreach (string path in oldFiles.Keys)
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Ошибка при просмотре whitelist:\n" + ex.Message,
+                MessageBox.Show("Помилка перегляду whitelist:\n" + ex.Message,
                     Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
@@ -7297,8 +7297,8 @@ foreach (string path in oldFiles.Keys)
 
             if (!JournalSettings.SetFilesEnabled(want))
             {
-                MessageBox.Show("Не удалось изменить настройку журнала:\n" +
-                        (JournalSettings.LastError ?? "нет прав на запись в реестр"),
+                MessageBox.Show("Не вдалося змінити налаштування журналу:\n" +
+                        (JournalSettings.LastError ?? "немає прав на запис у реєстр"),
                     Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
                 RefreshJournalMenu();
                 return;
@@ -7313,8 +7313,8 @@ foreach (string path in oldFiles.Keys)
                     // должна соответствовать действительности, поэтому
                     // возвращаем всё как было.
                     JournalSettings.SetFilesEnabled(false);
-                    MessageBox.Show("Не удалось сохранить дополнительное сочетание:\n" +
-                            (HotkeyStore.LastError ?? "нет прав на запись в реестр"),
+                    MessageBox.Show("Не вдалося зберегти додаткову комбінацію:\n" +
+                            (HotkeyStore.LastError ?? "немає прав на запис у реєстр"),
                         Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
                     RefreshJournalMenu();
                     return;
@@ -7333,18 +7333,18 @@ foreach (string path in oldFiles.Keys)
             RefreshJournalMenu();
             _icon.ShowBalloonTip(3000, Program.Title,
                 want
-                    ? "Журнал копирования ВКЛЮЧЁН.\n" +
-                      "Записываются: скопированные, изменённые, удалённые\n" +
-                      "и переименованные файлы на разрешённых накопителях\n" +
-                      "(без содержимого файлов и без имени пользователя).\n" +
-                      "Хранится 10 файлов по 5000 записей.\n" +
-                      "Журнал открывается клавишами " +
+                    ? "Журнал копіювання УВІМКНЕНО.\n" +
+                      "Записуються: скопійовані, змінені, видалені\n" +
+                      "і перейменовані файли на дозволених накопичувачах\n" +
+                      "(без вмісту файлів і без імені користувача).\n" +
+                      "Зберігається 10 файлів по 5000 записів.\n" +
+                      "Журнал відкривається клавішами " +
                       HotkeyStore.DefaultText +
-                      (string.IsNullOrEmpty(extra) ? "" : " и " + extra) + "."
-                    : "Журнал копирования ВЫКЛЮЧЕН.\n" +
-                      "Дополнительное сочетание снято, основное " +
-                      HotkeyStore.DefaultText + " работает.\n" +
-                      "Уже накопленные записи остаются - их можно открыть.",
+                      (string.IsNullOrEmpty(extra) ? "" : " і " + extra) + "."
+                    : "Журнал копіювання ВИМКНЕНО.\n" +
+                      "Додаткову комбінацію знято, основну " +
+                      HotkeyStore.DefaultText + " працює.\n" +
+                      "Уже накопичені записи лишаються - їх можна відкрити.",
                 ToolTipIcon.Info);
         }
 
@@ -7373,7 +7373,7 @@ foreach (string path in oldFiles.Keys)
                 string err = ServiceManager.Install();
                 if (err != null)
                 {
-                    MessageBox.Show("Ошибка:\n" + err,
+                    MessageBox.Show("Помилка:\n" + err,
                         Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
@@ -7398,31 +7398,31 @@ foreach (string path in oldFiles.Keys)
                 if (tErr != null)
                 {
                     MessageBox.Show(
-                        "Служба установлена, но не удалось настроить значок в трее\n" +
-                        "для других пользователей:\n" + tErr,
+                        "Службу встановлено, але не вдалося налаштувати значок у треї\n" +
+                        "для інших користувачів:\n" + tErr,
                         Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
                 _icon.ShowBalloonTip(3000, Program.Title,
-                    "Служба мониторинга установлена и запущена от имени SYSTEM.\n" +
-                    "Журнал подключений ВКЛЮЧЁН автоматически.\n" +
-                    "Журнал копирования включается галочкой пункта J.\n" +
-                    "Значок в трее и уведомления появятся у всех пользователей\n" +
-                    "после перезагрузки. Уведомления работают независимо от\n" +
-                    "выгрузки значка из трея.\n" +
+                    "Службу моніторингу встановлено та запущено від імені SYSTEM.\n" +
+                    "Журнал підключень УВІМКНЕНО автоматично.\n" +
+                    "Журнал копіювання вмикається галочкою пункту J.\n" +
+                    "Значок у треї та сповіщення з'являться в усіх користувачів\n" +
+                    "після перезавантаження. Сповіщення працюють незалежно від\n" +
+                    "вигрузки значка з трея.\n" +
                     (hotkeyOk
-                        ? "Журнал открывается клавишами " + HotkeyStore.DefaultText + "."
-                        : "Внимание: комбинацию клавиш журнала сохранить не удалось" +
+                        ? "Журнал відкривається клавішами " + HotkeyStore.DefaultText + "."
+                        : "Увага: комбінацію клавіш журналу зберегти не вдалося" +
                           (HotkeyStore.LastError != null ? " (" + HotkeyStore.LastError + ")" : "") + ".") +
                     (journalOk
                         ? ""
-                        : "\nВнимание: журнал подключений включить не удалось" +
+                        : "\nУвага: журнал підключень увімкнути не вдалося" +
                           (JournalSettings.LastError != null ? " (" + JournalSettings.LastError + ")" : "") + "."),
                     ToolTipIcon.Info);
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Ошибка:\n" + ex.Message,
+                MessageBox.Show("Помилка:\n" + ex.Message,
                     Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
@@ -7444,7 +7444,7 @@ foreach (string path in oldFiles.Keys)
                 string err = ServiceManager.Uninstall();
                 if (err != null)
                 {
-                    MessageBox.Show("Ошибка:\n" + err,
+                    MessageBox.Show("Помилка:\n" + err,
                         Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
@@ -7465,14 +7465,14 @@ foreach (string path in oldFiles.Keys)
                 RefreshServiceMenu();
                 RefreshJournalMenu();
                 _icon.ShowBalloonTip(3000, Program.Title,
-                    "Служба мониторинга удалена.\n" +
-                    "Журнал подключений ВЫКЛЮЧЕН.\n" +
-                    "Значок в трее у пользователей будет убран после перезагрузки.",
+                    "Службу моніторингу видалено.\n" +
+                    "Журнал підключень ВИМКНЕНО.\n" +
+                    "Значок у треї в користувачів буде прибрано після перезавантаження.",
                     ToolTipIcon.Info);
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Ошибка:\n" + ex.Message,
+                MessageBox.Show("Помилка:\n" + ex.Message,
                     Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
@@ -7488,13 +7488,13 @@ foreach (string path in oldFiles.Keys)
             if (!EnsurePassword()) return;
 
             if (MessageBox.Show(
-                    "Удалить программу?\n\r" +
-                    "Будут удалены:\n" +
-                    "  - служба мониторинга (если установлена)\n" +
-                    "  - задача значков в трее для пользователей (если была)\n" +
-                    "  - защищённая копия в \"Program Files\\USB_Block\"\n" +
-                    "  - политика блокировки USB-устройств\n" +
-                    "  - сам файл программы",
+                    "Видалити застосунок?\n\r" +
+                    "Буде видалено:\n" +
+                    "  - службу моніторингу (якщо встановлено)\n" +
+                    "  - задачу значків у треї для користувачів (якщо була)\n" +
+                    "  - захищену копію в \"Program Files\\USB_Block\"\n" +
+                    "  - політику блокування USB-пристроїв\n" +
+                    "  - сам файл програми",
                     Program.Title, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
             {
                 return;
@@ -7534,11 +7534,11 @@ foreach (string path in oldFiles.Keys)
             if (Directory.Exists(StorePaths.Directory))
             {
                 if (MessageBox.Show(
-                        "Удалить сохранённые данные?\n" +
-                        "  - whitelist (список разрешённых устройств)\n" +
-                        "  - пароль защиты меню\n" +
-                        "  - журнал подключений и копирований\n" +
-                        "Без подтверждения эти файлы останутся на месте",
+                        "Видалити збережені дані?\n" +
+                        "  - whitelist (список дозволених пристроїв)\n" +
+                        "  - пароль захисту меню\n" +
+                        "  - журнал підключень і копіювань\n" +
+                        "Без підтвердження ці файли лишаться на місці",
                         Program.Title, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
                 {
                     deleteData = true;
@@ -7595,7 +7595,7 @@ foreach (string path in oldFiles.Keys)
             // 7) самоудаление запущенного exe после выхода (и папок-копий)
             ScheduleSelfDelete(running, delayedDirs.Count > 0 ? string.Join(";", delayedDirs.ToArray()) : null);
 
-            MessageBox.Show("Программа удалена.",
+            MessageBox.Show("Програму видалено.",
                 Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
 
             this.ExitThread();
@@ -7655,7 +7655,7 @@ foreach (string path in oldFiles.Keys)
         private bool EnsureAdmin()
         {
             if (Program.IsAdministrator()) return true;
-            MessageBox.Show("Требуются права администратора.",
+            MessageBox.Show("Потрібні права адміністратора.",
                 Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
         }
@@ -7673,8 +7673,8 @@ foreach (string path in oldFiles.Keys)
 
             for (int attempt = 1; attempt <= PasswordAttempts; attempt++)
             {
-                using (PasswordForm f = new PasswordForm("Пароль защиты",
-                    "Введите пароль для доступа к этому пункту меню:", false))
+                using (PasswordForm f = new PasswordForm("Пароль захисту",
+                    "Введіть пароль для доступу до цього пункту меню:", false))
                 {
                     if (f.ShowDialog() != DialogResult.OK) return false;
                     if (AdminPassword.Verify(f.Password)) return true;
@@ -7682,13 +7682,13 @@ foreach (string path in oldFiles.Keys)
 
                 if (attempt < PasswordAttempts)
                 {
-                    MessageBox.Show("Неверный пароль.\nОсталось попыток: " +
+                    MessageBox.Show("Невірний пароль.\nЗалишилося спроб: " +
                         (PasswordAttempts - attempt).ToString(CultureInfo.InvariantCulture) + ".",
                         Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             }
 
-            MessageBox.Show("Превышено число попыток ввода пароля.\nПункт не выполнен.",
+            MessageBox.Show("Перевищено число спроб введення пароля.\nПункт не виконано.",
                 Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
         }
@@ -7715,10 +7715,10 @@ foreach (string path in oldFiles.Keys)
                 if (!string.IsNullOrEmpty(current)) return current;
 
                 DialogResult dr = MessageBox.Show(
-                    "Дополнительное сочетание не задано.\n\n" +
-                    "Журнал копирования будет включён, и открывать его можно\n" +
-                    "только основной комбинацией " + HotkeyStore.DefaultText + ".\n\n" +
-                    "(«Нет» - вернуться к выбору сочетания)",
+                    "Додаткову комбінацію не задано.\n\n" +
+                    "Журнал копіювання буде увімкнено, і відкривати його можна\n" +
+                    "лише основною комбінацією " + HotkeyStore.DefaultText + ".\n\n" +
+                    "(«Ні» - повернутися до вибору комбінації)",
                     Program.Title, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                 if (dr == DialogResult.Yes) return string.Empty;
             }
@@ -7729,36 +7729,36 @@ foreach (string path in oldFiles.Keys)
             StringBuilder sb = new StringBuilder();
             if (AdminPassword.IsSet())
             {
-                sb.AppendLine("Пароль защиты уже установлен.");
+                sb.AppendLine("Пароль захисту вже встановлено.");
                 sb.AppendLine();
-                sb.AppendLine("Установить новый пароль сейчас?");
-                sb.AppendLine("«Нет» - оставить прежний пароль.");
+                sb.AppendLine("Встановити новий пароль зараз?");
+                sb.AppendLine("«Ні» - лишити попередній пароль.");
             }
             else
             {
-                sb.AppendLine("Установить пароль для защиты опасных пунктов меню?");
+                sb.AppendLine("Встановити пароль для захисту небезпечних пунктів меню?");
                 sb.AppendLine();
-                sb.AppendLine("Пароль будет запрашиваться при:");
-                sb.AppendLine("  2 Разблокировать");
-                sb.AppendLine("  3 Добавить устройство");
-                sb.AppendLine("  4 Удалить устройство из whitelist");
-                sb.AppendLine("  6 Импортировать whitelist");
-                sb.AppendLine("  8 Удалить службу мониторинга");
-                sb.AppendLine("  9 Удалить программу");
+                sb.AppendLine("Пароль запитуватиметься при:");
+                sb.AppendLine("  2 Розблокувати пристрої");
+                sb.AppendLine("  3 Додати пристрій");
+                sb.AppendLine("  4 Видалити пристрій із WHITELIST");
+                sb.AppendLine("  6 Імпортувати WHITELIST");
+                sb.AppendLine("  8 Видалити службу");
+                sb.AppendLine("  9 Видалити застосунок");
                 sb.AppendLine();
                 sb.AppendLine(AdminPassword.PolicyHint());
-                sb.AppendLine("Запомните пароль: он хранится только в виде хэша.");
-                sb.AppendLine("Забытый пароль удаляется пунктом «Удалить пароль».");
+                sb.AppendLine("Запам'ятайте пароль: він зберігається лише у вигляді хеша.");
+                sb.AppendLine("Забутий пароль видаляється пунктом «Видалити пароль».");
             }
 
             if (MessageBox.Show(sb.ToString(), Program.Title,
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
                 return true;
 
-            using (PasswordForm f = new PasswordForm("Установка пароля",
-                "Задайте пароль для пунктов 2, 3, 4, 6, 8, 9.\n" +
+            using (PasswordForm f = new PasswordForm("Встановлення пароля",
+                "Задайте пароль для пунктів 2, 3, 4, 6, 8, 9.\n" +
                     AdminPassword.PolicyHint(), true,
-                "Новый пароль:"))
+                "Новий пароль:"))
             {
                 if (f.ShowDialog() != DialogResult.OK) return false;
                 try
@@ -7767,20 +7767,20 @@ foreach (string path in oldFiles.Keys)
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show("Не удалось сохранить пароль:\n" + ex.Message,
+                    MessageBox.Show("Не вдалося зберегти пароль:\n" + ex.Message,
                         Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return false;
                 }
             }
 
-            MessageBox.Show("Пароль установлен.\n\n" +
-                "Он будет запрашиваться при пунктах:\n" +
-                "  2 Разблокировать\n" +
-                "  3 Добавить устройство\n" +
-                "  4 Удалить устройство из whitelist\n" +
-                "  6 Импортировать whitelist\n" +
-                "  8 Удалить службу мониторинга\n" +
-                "  9 Удалить программу",
+            MessageBox.Show("Пароль встановлено.\n\n" +
+                "Його запитуватиметься в пунктах:\n" +
+                "  2 Розблокувати пристрої\n" +
+                "  3 Додати пристрій\n" +
+                "  4 Видалити пристрій із WHITELIST\n" +
+                "  6 Імпортувати WHITELIST\n" +
+                "  8 Видалити службу\n" +
+                "  9 Видалити застосунок",
                 Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return true;
         }
@@ -7796,20 +7796,20 @@ foreach (string path in oldFiles.Keys)
 
             if (!AdminPassword.IsSet())
             {
-                MessageBox.Show("Пароль не установлен - удалять нечего.",
+                MessageBox.Show("Пароль не встановлено - видаляти нічого.",
                     Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
             StringBuilder sb = new StringBuilder();
-            sb.AppendLine("Удалить пароль защиты?");
+            sb.AppendLine("Видалити пароль захисту?");
             sb.AppendLine();
-            sb.AppendLine("  «Да»     - подтвердить текущим паролем");
-            sb.AppendLine("  «Нет»    - подтвердить кодовым словом (если пароль забыт)");
-            sb.AppendLine("  «Отмена» - ничего не делать");
+            sb.AppendLine("  «Так»       - підтвердити поточним паролем");
+            sb.AppendLine("  «Ні»        - підтвердити кодовим словом (якщо пароль забуто)");
+            sb.AppendLine("  «Скасувати» - нічого не робити");
             sb.AppendLine();
-            sb.AppendLine("После удаления пункты 2, 3, 4, 6, 8, 9 будут");
-            sb.AppendLine("доступны без пароля.");
+            sb.AppendLine("Після видалення пункти 2, 3, 4, 6, 8, 9 будуть");
+            sb.AppendLine("доступні без пароля.");
             DialogResult how = MessageBox.Show(sb.ToString(), Program.Title,
                 MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
             if (how == DialogResult.Cancel) return;
@@ -7821,14 +7821,14 @@ foreach (string path in oldFiles.Keys)
 
             if (!AdminPassword.Clear())
             {
-                MessageBox.Show("Не удалось удалить файл пароля:\n" +
+                MessageBox.Show("Не вдалося видалити файл пароля:\n" +
                         AdminPassword.FilePath,
                     Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
 
-            MessageBox.Show("Пароль удалён.\n\n" +
-                "Пункты 2, 3, 4, 6, 8, 9 теперь доступны без пароля.",
+            MessageBox.Show("Пароль видалено.\n\n" +
+                "Пункти 2, 3, 4, 6, 8, 9 тепер доступні без пароля.",
                 Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
@@ -7838,8 +7838,8 @@ foreach (string path in oldFiles.Keys)
         {
             for (int attempt = 1; attempt <= PasswordAttempts; attempt++)
             {
-                using (PasswordForm f = new PasswordForm("Удаление пароля",
-                    "Введите текущий пароль:", false, "Пароль:"))
+                using (PasswordForm f = new PasswordForm("Видалення пароля",
+                    "Введіть поточний пароль:", false, "Пароль:"))
                 {
                     if (f.ShowDialog() != DialogResult.OK) return false;
                     if (AdminPassword.Verify(f.Password)) return true;
@@ -7847,13 +7847,13 @@ foreach (string path in oldFiles.Keys)
 
                 if (attempt < PasswordAttempts)
                 {
-                    MessageBox.Show("Неверный пароль.\nОсталось попыток: " +
+                    MessageBox.Show("Невірний пароль.\nЗалишилося спроб: " +
                         (PasswordAttempts - attempt).ToString(CultureInfo.InvariantCulture) + ".",
                         Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             }
 
-            MessageBox.Show("Превышено число попыток ввода пароля.\nПароль не удалён.",
+            MessageBox.Show("Перевищено число спроб введення пароля.\nПароль не видалено.",
                 Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
         }
@@ -7863,8 +7863,8 @@ foreach (string path in oldFiles.Keys)
         {
             for (int attempt = 1; attempt <= PasswordAttempts; attempt++)
             {
-                using (PasswordForm f = new PasswordForm("Удаление пароля",
-                    "Введите кодовое слово:", false, "Кодовое слово:"))
+                using (PasswordForm f = new PasswordForm("Видалення пароля",
+                    "Введіть кодове слово:", false, "Кодове слово:"))
                 {
                     if (f.ShowDialog() != DialogResult.OK) return false;
                     if (AdminPassword.CheckCode(f.Password)) return true;
@@ -7872,13 +7872,13 @@ foreach (string path in oldFiles.Keys)
 
                 if (attempt < PasswordAttempts)
                 {
-                    MessageBox.Show("Неверное кодовое слово.\nОсталось попыток: " +
+                    MessageBox.Show("Невірне кодове слово.\nЗалишилося спроб: " +
                         (PasswordAttempts - attempt).ToString(CultureInfo.InvariantCulture) + ".",
                         Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             }
 
-            MessageBox.Show("Превышено число попыток ввода кодового слова.\nПароль не удалён.",
+            MessageBox.Show("Перевищено число спроб введення кодового слова.\nПароль не видалено.",
                 Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
         }
@@ -7946,10 +7946,10 @@ foreach (string path in oldFiles.Keys)
             if (string.IsNullOrEmpty(UsbJournalMonitor.WriteBlockedReason)) return;
             _journalWarned = true;
             _icon.ShowBalloonTip(6000, Program.Title,
-                "Журнал копирования включён, но записать в него нельзя.\n" +
+                "Журнал копіювання увімкнено, але записати в нього неможливо.\n" +
                 UsbJournalMonitor.WriteBlockedReason + ".\n" +
-                "Запустите программу с правами администратора или поставьте\n" +
-                "службу мониторинга (пункт 7).",
+                "Запустіть програму з правами адміністратора або встановіть\n" +
+                "службу моніторингу (пункт 7).",
                 ToolTipIcon.Warning);
         }
 
@@ -8099,8 +8099,8 @@ foreach (string path in oldFiles.Keys)
             try
             {
                 using (NotifyPopup p = new NotifyPopup(
-                    "ТЕСТ уведомления о блокировке.\n\n" + Program.NotifyText +
-                    "\n\nЕсли вы видите это окно в правом нижнем углу экрана, показ работает.",
+                    "ТЕСТ сповіщення про блокування.\n\n" + Program.NotifyText +
+                    "\n\nЯкщо ви бачите це вікно в правому нижньому кутку екрана, показ працює.",
                     8000))
                 {
                     p.ShowInTaskbar = false;
@@ -8110,7 +8110,7 @@ foreach (string path in oldFiles.Keys)
             }
             catch (Exception ex)
             {
-                string msg = "Не удалось показать тестовое уведомление: " + ex.Message;
+                string msg = "Не вдалося показати тестове сповіщення: " + ex.Message;
                 TraceLog(msg);
                 try
                 {
@@ -8159,11 +8159,11 @@ foreach (string path in oldFiles.Keys)
             {
                 if (!Program.StartJournalViewer(!Program.IsAdministrator()))
                 {
-                    TraceLog("горячая клавиша: не удалось запустить просмотр журнала");
+                    TraceLog("гаряча клавіша: не вдалося запустити перегляд журналу");
                 }
                 else
                 {
-                    TraceLog("горячая клавиша: запущен просмотр журнала (--journal)");
+                    TraceLog("гаряча клавіша: запущено перегляд журналу (--journal)");
                 }
             }
             catch
@@ -8228,10 +8228,10 @@ foreach (string path in oldFiles.Keys)
                 {
                     NotifyStore.BlockEvent newest = evs[evs.Count - 1];
                     _queue.Enqueue(new QueueItem { Id = newest.Id, Text = BuildText(newest) });
-                    TraceLog("счётчик впереди очереди (last=" +
+                    TraceLog("лічильник попереду черги (last=" +
                         last.ToString(CultureInfo.InvariantCulture) + " > max=" +
                         max.ToString(CultureInfo.InvariantCulture) +
-                        "): извлекаю последнее событие id=" +
+                        "): витягую останню подію id=" +
                         newest.Id.ToString(CultureInfo.InvariantCulture));
                 }
             }
@@ -8241,8 +8241,8 @@ foreach (string path in oldFiles.Keys)
                 {
                     if (e.Id > last) _queue.Enqueue(new QueueItem { Id = e.Id, Text = BuildText(e) });
                 }
-                TraceLog("в очереди показа " + _queue.Count +
-                    ", новых с id>" + last.ToString(CultureInfo.InvariantCulture) +
+                TraceLog("у черзі показу " + _queue.Count +
+                    ", нових з id>" + last.ToString(CultureInfo.InvariantCulture) +
                     " до " + max.ToString(CultureInfo.InvariantCulture));
             }
 
@@ -8280,7 +8280,7 @@ foreach (string path in oldFiles.Keys)
                 // Событие ОСТАЁТСЯ в очереди и будет повторено на следующем
                 // такте (LastEventId не продвинут - ничего не теряется).
                 LastShowError = ex.Message;
-                TraceLog("ОШИБКА создания окна: " + ex.Message);
+                TraceLog("ПОМИЛКА створення вікна: " + ex.Message);
                 return;
             }
             _queue.Dequeue();
@@ -8296,7 +8296,7 @@ foreach (string path in oldFiles.Keys)
             {
                 NotifyStore.SetLastSeen(shownId);
                 LastShowError = null;
-                TraceLog("показано уведомление id=" +
+                TraceLog("показано сповіщення id=" +
                     shownId.ToString(CultureInfo.InvariantCulture));
             };
             p.FormClosed += delegate
@@ -8313,7 +8313,7 @@ foreach (string path in oldFiles.Keys)
             catch (Exception ex)
             {
                 LastShowError = ex.Message;
-                TraceLog("ОШИБКА показа: " + ex.Message);
+                TraceLog("ПОМИЛКА показу: " + ex.Message);
                 _active = null;
                 try { p.Dispose(); }
                 catch { }
@@ -8500,7 +8500,7 @@ foreach (string path in oldFiles.Keys)
     public static class ServiceManager
     {
         public const string ServiceName = "UsbBlockMonitor";
-        public const string DisplayName = "USB-блокировка (мониторинг)";
+        public const string DisplayName = "USB-блокування (моніторинг)";
 
         // Установлена ли служба.
         public static bool IsInstalled()
@@ -8546,7 +8546,7 @@ foreach (string path in oldFiles.Keys)
                 // или отсутствующую копию).
                 string copyErr = ProtectedCopy.EnsureInstalledCopy();
                 if (copyErr != null)
-                    return "Не удалось обновить защищённую копию для службы:\n" + copyErr;
+                    return "Не вдалося оновити захищену копію для служби:\n" + copyErr;
 
                 ManagementClass serviceClass = new ManagementClass("Win32_Service");
                 ManagementBaseObject inParams = serviceClass.GetMethodParameters("Create");
@@ -8568,7 +8568,7 @@ foreach (string path in oldFiles.Keys)
                     serviceClass.InvokeMethod("Create", inParams, null);
                 uint ret = (uint)(outParams["ReturnValue"] ?? 0);
                 if (ret != 0)
-                    return "Не удалось создать службу (код " +
+                    return "Не вдалося створити службу (код " +
                         ret.ToString(CultureInfo.InvariantCulture) + ")";
                 Start();
                 return null;
@@ -8626,7 +8626,7 @@ foreach (string path in oldFiles.Keys)
                     ManagementBaseObject outParams = svc.InvokeMethod("Delete", null, null);
                     uint ret = (uint)(outParams["ReturnValue"] ?? 0);
                     if (ret != 0)
-                        return "Не удалось удалить службу (код " +
+                        return "Не вдалося видалити службу (код " +
                             ret.ToString(CultureInfo.InvariantCulture) + ")";
                     return null;
                 }
@@ -8729,97 +8729,97 @@ foreach (string path in oldFiles.Keys)
         public static int Run()
         {
             StringBuilder sb = new StringBuilder();
-            sb.AppendLine("USB_Block tray - диагностика");
-            sb.AppendLine("Время: " + DateTime.Now.ToString(CultureInfo.InvariantCulture));
-            sb.AppendLine("Администратор: " + Program.IsAdministrator());
-            sb.AppendLine("Защищённая копия: " + ProtectedCopy.InstallExe +
-                "  существует=" + File.Exists(ProtectedCopy.InstallExe));
-            sb.AppendLine("Служба мониторинга: " +
+            sb.AppendLine("USB_Block tray - діагностика");
+            sb.AppendLine("Час: " + DateTime.Now.ToString(CultureInfo.InvariantCulture));
+            sb.AppendLine("Адміністратор: " + Program.IsAdministrator());
+            sb.AppendLine("Захищена копія: " + ProtectedCopy.InstallExe +
+                "  існує=" + File.Exists(ProtectedCopy.InstallExe));
+            sb.AppendLine("Служба моніторингу: " +
                 (ServiceManager.IsInstalled()
                     ? ServiceManager.StatusText()
-                    : "не установлена"));
+                    : "не встановлена"));
             sb.AppendLine("Задача трея (--logon): " +
-                (TrayTask.IsInstalled() ? "есть" : "нет"));
-            sb.AppendLine("Задача уведомителя (--notify): " +
-                (TrayTask.NotifyInstalled() ? "есть" : "нет"));
-            sb.AppendLine("Процесс-уведомитель: " +
-                (NotifyRunning() ? "работает" : "не найден"));
-            sb.AppendLine("Событие блокировки (очередь): " + EventsSummary());
-            sb.AppendLine("Источник журнала событий (" + ServiceManager.ServiceName + "): " +
+                (TrayTask.IsInstalled() ? "є" : "немає"));
+            sb.AppendLine("Задача сповіщувача (--notify): " +
+                (TrayTask.NotifyInstalled() ? "є" : "немає"));
+            sb.AppendLine("Процес-сповіщувач: " +
+                (NotifyRunning() ? "працює" : "не знайдено"));
+            sb.AppendLine("Подія блокування (черга): " + EventsSummary());
+            sb.AppendLine("Джерело журналу подій (" + ServiceManager.ServiceName + "): " +
                 EventSourceStatus());
-            sb.AppendLine("Запись в очередь (HKLM\\SOFTWARE\\USB_Block\\Events): " +
+            sb.AppendLine("Запис у чергу (HKLM\\SOFTWARE\\USB_Block\\Events): " +
                 QueueWriteTest());
-            sb.AppendLine("Лог показа уведомлений (хвост " +
+            sb.AppendLine("Лог показу сповіщень (хвіст " +
                 Path.GetFileName(NotifyService.TracePath) +
-                " из %TEMP% и Windows\\Temp):");
+                " з %TEMP% і Windows\\Temp):");
             sb.AppendLine(NotifyTraceSummary());
 
             sb.AppendLine();
-            sb.AppendLine("--- Политика ---");
-            sb.AppendLine("Блокировка активна: " + PolicyManager.IsBlocked());
-            sb.AppendLine("Пароль защиты меню: " +
-                (AdminPassword.IsSet() ? "установлен" : "не установлен"));
+            sb.AppendLine("--- Політика ---");
+            sb.AppendLine("Блокування активне: " + PolicyManager.IsBlocked());
+            sb.AppendLine("Пароль захисту меню: " +
+                (AdminPassword.IsSet() ? "встановлено" : "не встановлено"));
 
             sb.AppendLine();
-            sb.AppendLine("--- Журнал подключений и копирований ---");
-            sb.AppendLine("Журнал подключений: " +
+            sb.AppendLine("--- Журнал підключень і копіювань ---");
+            sb.AppendLine("Журнал підключень: " +
                 (JournalSettings.IsConnectionsEnabled()
-                    ? "ВКЛЮЧЁН (включается установкой службы, выключается её удалением)"
-                    : "ВЫКЛЮЧЕН - записи о подключениях не пишутся"));
-            sb.AppendLine("Журнал копирования: " +
+                    ? "УВІМКНЕНО (вмикається встановленням служби, вимкається її видаленням)"
+                    : "ВИМКНЕНО - записи про підключення не пишуться"));
+            sb.AppendLine("Журнал копіювання: " +
                 (JournalSettings.IsFilesEnabled()
-                    ? "ВКЛЮЧЁН (галочка пункта J в меню трея)"
-                    : "ВЫКЛЮЧЕН (галочка пункта J в меню трея) - записи о файлах не пишутся"));
-            sb.AppendLine("Размер кольца каждого журнала: " +
+                    ? "УВІМКНЕНО (галочка пункту J в меню трея)"
+                    : "ВИМКНЕНО (галочка пункту J в меню трея) - записи про файли не пишуться"));
+            sb.AppendLine("Розмір кільця кожного журналу: " +
                 (StorePaths.JournalGenerations + 1).ToString(CultureInfo.InvariantCulture) +
-                " файлов по " + UsbJournal.MaxRecordsPerFile.ToString(CultureInfo.InvariantCulture) +
-                " записей (два независимых журнала: подключения и копирование)");
-            sb.AppendLine("Файл подключений: " + StorePaths.JournalFile +
-                "  существует=" + File.Exists(StorePaths.JournalFile));
-            sb.AppendLine("Файл копирования: " + StorePaths.JournalFilesFile +
-                "  существует=" + File.Exists(StorePaths.JournalFilesFile));
-            sb.AppendLine("Поколений: " + (StorePaths.JournalGenerations + 1) +
-                "  записей всего: " +
+                " файлів по " + UsbJournal.MaxRecordsPerFile.ToString(CultureInfo.InvariantCulture) +
+                " записів (два незалежні журнали: підключення і копіювання)");
+            sb.AppendLine("Файл підключень: " + StorePaths.JournalFile +
+                "  існує=" + File.Exists(StorePaths.JournalFile));
+            sb.AppendLine("Файл копіювання: " + StorePaths.JournalFilesFile +
+                "  існує=" + File.Exists(StorePaths.JournalFilesFile));
+            sb.AppendLine("Поколінь: " + (StorePaths.JournalGenerations + 1) +
+                "  записів усього: " +
                 UsbJournal.TotalRecordCount().ToString(CultureInfo.InvariantCulture) +
-                " (подключений и служебных: " +
+                " (підключень і службових: " +
                 UsbJournal.TotalRecordCount(UsbJournal.StreamDevices).ToString(CultureInfo.InvariantCulture) +
-                ", файловых: " +
+                ", файлових: " +
                 UsbJournal.TotalRecordCount(UsbJournal.StreamFiles).ToString(CultureInfo.InvariantCulture) + ")" +
-                "  в текущих файлах: " +
+                "  у поточних файлах: " +
                 UsbJournal.CurrentRecordCount().ToString(CultureInfo.InvariantCulture) +
-                "  размер всего: " +
+                "  розмір усього: " +
                 UsbJournal.TotalSizeBytes().ToString(CultureInfo.InvariantCulture) + " байт");
-            sb.AppendLine("Ведёт журнал: " + JournalOwnerSummary());
-            sb.AppendLine("Право дописывать в журнал у этого процесса: " +
+            sb.AppendLine("Веде журнал: " + JournalOwnerSummary());
+            sb.AppendLine("Право дописувати в журнал у цього процесу: " +
                 UsbJournalRights.CanWriteNow());
             if (!string.IsNullOrEmpty(UsbJournalMonitor.WriteBlockedReason))
-                sb.AppendLine("  запись невозможна: " + UsbJournalMonitor.WriteBlockedReason);
+                sb.AppendLine("  запис неможливий: " + UsbJournalMonitor.WriteBlockedReason);
             if (!string.IsNullOrEmpty(UsbJournalMonitor.OwnerNameElsewhere))
-                sb.AppendLine("  журнал ведёт другой процесс: " +
+                sb.AppendLine("  журнал веде інший процес: " +
                     UsbJournalMonitor.OwnerNameElsewhere);
             if (!string.IsNullOrEmpty(UsbJournalRights.LastError))
-                sb.AppendLine("  ошибка выдачи прав: " + UsbJournalRights.LastError);
-            sb.AppendLine("Последний опрос: файлов " +
+                sb.AppendLine("  помилка видачі прав: " + UsbJournalRights.LastError);
+            sb.AppendLine("Останній опит: файлів " +
                 UsbJournalMonitor.LastFileCount.ToString(CultureInfo.InvariantCulture) +
-                ", томов обрезано по лимиту " +
+                ", томів обрізано за лімітом " +
                 UsbJournalMonitor.LastTruncatedVolumes.ToString(CultureInfo.InvariantCulture));
             if (!string.IsNullOrEmpty(UsbJournalMonitor.LastError))
-                sb.AppendLine("Ошибка наблюдения: " + UsbJournalMonitor.LastError);
+                sb.AppendLine("Помилка спостереження: " + UsbJournalMonitor.LastError);
             if (!string.IsNullOrEmpty(UsbJournal.LastError))
-                sb.AppendLine("Ошибка журнала: " + UsbJournal.LastError);
-            sb.AppendLine("Основная клавиша журнала: " + JournalHotkeySummary(""));
-            sb.AppendLine("Дополнительная клавиша журнала (галочка J): " +
+                sb.AppendLine("Помилка журналу: " + UsbJournal.LastError);
+            sb.AppendLine("Основна клавіша журналу: " + JournalHotkeySummary(""));
+            sb.AppendLine("Додаткова клавіша журналу (галочка J): " +
                 JournalHotkeySummary("2"));
             if (!string.IsNullOrEmpty(HotkeyStore.LastError))
-                sb.AppendLine("  ошибка регистрации: " + HotkeyStore.LastError);
+                sb.AppendLine("  помилка реєстрації: " + HotkeyStore.LastError);
 
             sb.AppendLine();
-            sb.AppendLine("--- Whitelist ---");
+            sb.AppendLine("--- WHITELIST ---");
             sb.AppendLine("Файл: " + StorePaths.File);
             try
             {
                 List<DeviceEntry> wl = WhitelistStore.Load();
-                sb.AppendLine("Записей: " + wl.Count);
+                sb.AppendLine("Записів: " + wl.Count);
                 foreach (DeviceEntry e in wl)
                 {
                     sb.AppendLine("  NAME=" + e.Name + "  USB=" + e.UsbId +
@@ -8828,15 +8828,15 @@ foreach (string path in oldFiles.Keys)
             }
             catch (Exception ex)
             {
-                sb.AppendLine("Ошибка чтения (ожидаемо без прав администратора): " + ex.Message);
+                sb.AppendLine("Помилка читання (очікувано без прав адміністратора): " + ex.Message);
             }
 
             sb.AppendLine();
-            sb.AppendLine("--- USB-диски (подключённые) ---");
+            sb.AppendLine("--- USB-диски (підключені) ---");
             try
             {
                 List<StorageDevice> disks = UsbQuery.GetUsbStorages();
-                sb.AppendLine("Найдено: " + disks.Count);
+                sb.AppendLine("Знайдено: " + disks.Count);
                 foreach (StorageDevice sd in disks)
                 {
                     sb.AppendLine("  INST=" + sd.InstanceId);
@@ -8846,15 +8846,15 @@ foreach (string path in oldFiles.Keys)
             }
             catch (Exception ex)
             {
-                sb.AppendLine("Ошибка: " + ex.Message);
+                sb.AppendLine("Помилка: " + ex.Message);
             }
 
             sb.AppendLine();
-            sb.AppendLine("--- Смонтированные тома USB (точки монтирования) ---");
+            sb.AppendLine("--- Смонтувані томи USB (точки монтування) ---");
             try
             {
                 List<UsbVolume> volumes = UsbQuery.GetUsbVolumes();
-                sb.AppendLine("Найдено: " + volumes.Count);
+                sb.AppendLine("Знайдено: " + volumes.Count);
                 foreach (UsbVolume v in volumes)
                 {
                     sb.AppendLine("  LETTER=" + v.DriveLetter + "  USB=" + v.UsbId +
@@ -8863,15 +8863,15 @@ foreach (string path in oldFiles.Keys)
             }
             catch (Exception ex)
             {
-                sb.AppendLine("Ошибка: " + ex.Message);
+                sb.AppendLine("Помилка: " + ex.Message);
             }
 
             sb.AppendLine();
-            sb.AppendLine("--- USB-узлы массовой памяти ---");
+            sb.AppendLine("--- USB-вузли масової пам'яті ---");
             try
             {
                 List<UsbNode> nodes = UsbQuery.GetUsbMassStorageNodes();
-                sb.AppendLine("Найдено: " + nodes.Count);
+                sb.AppendLine("Знайдено: " + nodes.Count);
                 foreach (UsbNode n in nodes)
                 {
                     sb.AppendLine("  INST=" + n.InstanceId + "  PRESENT=" + n.Present +
@@ -8881,26 +8881,26 @@ foreach (string path in oldFiles.Keys)
             }
             catch (Exception ex)
             {
-                sb.AppendLine("Ошибка: " + ex.Message);
+                sb.AppendLine("Помилка: " + ex.Message);
             }
 
             sb.AppendLine();
-            sb.AppendLine("--- Все масс-сторадж узлы (реестр) ---");
+            sb.AppendLine("--- Усі мас-сторадж вузли (реєстр) ---");
             try
             {
                 List<string> all = UsbQuery.GetAllMassStorageInstances();
-                sb.AppendLine("Найдено: " + all.Count);
+                sb.AppendLine("Знайдено: " + all.Count);
                 foreach (string s in all)
                     sb.AppendLine("  " + s);
             }
             catch (Exception ex)
             {
-                sb.AppendLine("Ошибка: " + ex.Message);
+                sb.AppendLine("Помилка: " + ex.Message);
             }
 
             string logPath = Program.PreferredLogPath("diag.log");
             sb.Insert(0,
-                "Файл этого лога: " + logPath + Environment.NewLine);
+                "Файл цього лога: " + logPath + Environment.NewLine);
             Program.WriteLog("diag.log", sb.ToString());
             return 0;
         }
@@ -8913,14 +8913,14 @@ foreach (string path in oldFiles.Keys)
         {
             if (UsbJournalMonitor.IsOwner) return UsbJournalMonitor.OwnerName;
             if (!JournalSettings.IsEnabled())
-                return "журнал выключен (пункт J в меню трея)";
+                return "журнал вимкнено (пункт J в меню трея)";
             // Метка последнего цикла надёжнее поиска процесса: командную
             // строку процесса с повышенными правами обычный пользователь
             // через WMI не видит (CommandLine приходит пустым), и живой
             // трей выглядел бы в диагностике как незапущенный.
             string age = JournalCycleAge();
             if (age != null)
-                return "цикл наблюдения обновляется, последний " + age + " (трей или служба)";
+                return "цикл спостереження оновлюється, останній " + age + " (трей або служба)";
             try
             {
                 if (ServiceManager.IsInstalled())
@@ -8931,16 +8931,16 @@ foreach (string path in oldFiles.Keys)
                     {
                         return "служба " + ServiceManager.ServiceName + " (" + st + ")";
                     }
-                    return "служба " + ServiceManager.ServiceName + " установлена, но " +
-                        "остановлена (" + st + ") - журнал ведёт трей, если он запущен";
+                    return "служба " + ServiceManager.ServiceName + " встановлена, але " +
+                        "зупинена (" + st + ") - журнал веде трей, якщо він запущений";
                 }
             }
             catch
             {
             }
-            if (TrayRunning()) return "трей (текущий пользователь)";
-            return "НЕ ВЕДЁТ НИКТО: служба не установлена и трей не запущен - " +
-                "журнал пополняться не будет";
+            if (TrayRunning()) return "трей (поточний користувач)";
+            return "НІХТО НЕ ВЕДЕ: службу не встановлено і трей не запущено - " +
+                "журнал не поповнюватиметься";
         }
 
         // Насколько давно был цикл наблюдения (его пишет тот, кто ведёт
@@ -8958,11 +8958,11 @@ foreach (string path in oldFiles.Keys)
                     long ticks = Convert.ToInt64(v, CultureInfo.InvariantCulture);
                     if (ticks <= 0) return null;
                     double s = (DateTime.Now - new DateTime(ticks)).TotalSeconds;
-                    if (s < 0) return "только что";
-                    if (s < 90) return ((int)s).ToString(CultureInfo.InvariantCulture) + " с назад";
+                    if (s < 0) return "щойно";
+                    if (s < 90) return ((int)s).ToString(CultureInfo.InvariantCulture) + " с тому";
                     if (s < 5400)
-                        return ((int)(s / 60)).ToString(CultureInfo.InvariantCulture) + " мин назад";
-                    return ((int)(s / 3600)).ToString(CultureInfo.InvariantCulture) + " ч назад";
+                        return ((int)(s / 60)).ToString(CultureInfo.InvariantCulture) + " хв тому";
+                    return ((int)(s / 3600)).ToString(CultureInfo.InvariantCulture) + " год тому";
                 }
             }
             catch
@@ -8980,12 +8980,12 @@ foreach (string path in oldFiles.Keys)
             if (string.IsNullOrEmpty(text)) return "не задана";
             uint mods, vk;
             if (!HotkeyStore.TryParse(text, out mods, out vk))
-                return text + "  (НЕ РАСПОЗНАЁТСЯ, не сработает)";
+                return text + "  (НЕ РОЗПІЗНАЄТЬСЯ, не спрацює)";
             return text + "  -> Ctrl=" + ((mods & HotkeyStore.ModControl) != 0) +
                 " Alt=" + ((mods & HotkeyStore.ModAlt) != 0) +
                 " Shift=" + ((mods & HotkeyStore.ModShift) != 0) +
                 " Win=" + ((mods & HotkeyStore.ModWin) != 0) +
-                " клавиша=0x" + vk.ToString("X2", CultureInfo.InvariantCulture);
+                " клавіша=0x" + vk.ToString("X2", CultureInfo.InvariantCulture);
         }
 
         // Работает ли сейчас отдельный процесс-уведомитель (--notify) в
@@ -9060,12 +9060,12 @@ foreach (string path in oldFiles.Keys)
                 long max = 0;
                 foreach (NotifyStore.BlockEvent e in evs)
                     if (e.Id > max) max = e.Id;
-                return "записей=" + evs.Count + ", макс.id=" + max +
+                return "записів=" + evs.Count + ", макс.id=" + max +
                     ", LastEventId(HKCU)=" + last;
             }
             catch (Exception ex)
             {
-                return "ошибка чтения: " + ex.Message;
+                return "помилка читання: " + ex.Message;
             }
         }
 
@@ -9112,10 +9112,10 @@ foreach (string path in oldFiles.Keys)
                 }
                 catch (Exception ex)
                 {
-                    sb.AppendLine("  ошибка чтения: " + ex.Message);
+                    sb.AppendLine("  помилка читання: " + ex.Message);
                 }
             }
-            if (!any) return "  <нет лога - показ ещё не запускался>";
+            if (!any) return "  <немає лога - показ ще не запускався>";
             return sb.ToString().TrimEnd();
         }
 
@@ -9127,11 +9127,11 @@ foreach (string path in oldFiles.Keys)
             try
             {
                 return System.Diagnostics.EventLog.SourceExists(ServiceManager.ServiceName)
-                    ? "зарегистрирован" : "НЕ зарегистрирован";
+                    ? "зареєстровано" : "НЕ зареєстровано";
             }
             catch (Exception ex)
             {
-                return "не удалось определить (" + ex.Message + ")";
+                return "не вдалося визначити (" + ex.Message + ")";
             }
         }
 
@@ -9152,7 +9152,7 @@ foreach (string path in oldFiles.Keys)
             }
             catch (Exception ex)
             {
-                return "НЕТ (" + ex.Message + ")";
+                return "НІ (" + ex.Message + ")";
             }
         }
     }
