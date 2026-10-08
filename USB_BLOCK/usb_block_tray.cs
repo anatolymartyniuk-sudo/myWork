@@ -2402,8 +2402,8 @@ namespace UsbBlockTray
                  model.IndexOf('\\') >= 0))
                 model = null;
             return string.IsNullOrEmpty(model)
-                ? "Заблокирован накопитель"
-                : "Заблокирован накопитель: " + model;
+                ? "Заблоковано пристрій"
+                : "Заблоковано пристрій: " + model;
         }
 
         private static string FormatValue(BlockEvent e)
@@ -9217,9 +9217,9 @@ foreach (string path in oldFiles.Keys)
                 string dModel = NotifyStore.BlockDetail("Samsung Portable SSD T3");
                 string dUsbId = NotifyStore.BlockDetail("USB\\VID_8564&PID_1000");
                 string dEmpty = NotifyStore.BlockDetail(null);
-                bool dOk = dModel == "Заблокирован накопитель: Samsung Portable SSD T3" &&
-                    dUsbId == "Заблокирован накопитель" &&
-                    dEmpty == "Заблокирован накопитель" &&
+                bool dOk = dModel == "Заблоковано пристрій: Samsung Portable SSD T3" &&
+                    dUsbId == "Заблоковано пристрій" &&
+                    dEmpty == "Заблоковано пристрій" &&
                     !dModel.Contains("SN=") && !dModel.Contains("VID");
                 sb.AppendLine("Notify detail (только модель, без SN и VID:PID): " +
                     (dOk ? "OK" : "FAIL") +
