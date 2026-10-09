@@ -420,3 +420,14 @@ WHITELIST порожній - видаляти нічого.	WHITELIST is empty -
 Мова / Language	Мова / Language
 Поточна мова: 	Current language: 
 Відсутні ключі англійської (missing English): 	Missing English keys: 
+Обрати всі	Select all
+Додано: 	Added: 
+Диск: 	Disk: 
+Модель накопичувача: 	Drive model: 
+Модель=	Model=
+Метка=	Label=
+Решение=	Decision=
+Буква=	Letter=
+Размер=	Size=
+разрешён	allowed
+заблокирован	blocked

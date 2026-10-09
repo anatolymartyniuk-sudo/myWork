@@ -21,8 +21,8 @@ using Microsoft.Win32;
 // Версия программы. Та же цифра стоит и в app.manifest (assemblyIdentity):
 // при каждой сборке обновляются ОБЕ, иначе в свойствах файла и в манифесте
 // разойдутся. Проверка - в самопроверке ("Build version").
-[assembly: AssemblyVersion("1.81.0.0")]
-[assembly: AssemblyFileVersion("1.81.0.0")]
+[assembly: AssemblyVersion("1.82.0.0")]
+[assembly: AssemblyFileVersion("1.82.0.0")]
 
 namespace UsbBlockTray
 {
@@ -5572,6 +5572,55 @@ foreach (string path in oldFiles.Keys)
         }
     }
 
+    // Выравнивание записей по столбцам: ширина каждого столбца берётся по
+    // самой длинной записи, поэтому столбцы стоят ровно друг под другом.
+    // Пустые поля в конце строки отбрасываются, последнее поле не добивается
+    // пробелами. Разделитель столбцов задаёт вызывающий код.
+    internal static class TextAlign
+    {
+        public static List<string> Align(List<string[]> rows, string separator)
+        {
+            List<string[]> clean = new List<string[]>(rows.Count);
+            int count = 0;
+            foreach (string[] r in rows)
+            {
+                int len = r.Length;
+                while (len > 0 && string.IsNullOrEmpty(r[len - 1])) len--;
+                string[] c;
+                if (len == r.Length)
+                {
+                    c = r;
+                }
+                else
+                {
+                    c = new string[len];
+                    Array.Copy(r, c, len);
+                }
+                clean.Add(c);
+                if (len > count) count = len;
+            }
+
+            int[] width = new int[count];
+            foreach (string[] r in clean)
+                for (int j = 0; j < r.Length; j++)
+                    if (r[j].Length > width[j]) width[j] = r[j].Length;
+
+            List<string> result = new List<string>(clean.Count);
+            foreach (string[] r in clean)
+            {
+                StringBuilder sb = new StringBuilder();
+                for (int j = 0; j < r.Length; j++)
+                {
+                    if (j > 0) sb.Append(separator);
+                    if (j < r.Length - 1) sb.Append(r[j].PadRight(width[j]));
+                    else sb.Append(r[j]);
+                }
+                result.Add(sb.ToString());
+            }
+            return result;
+        }
+    }
+
     // Удаление устройства из whitelist: выбор одной записи из списка.
     // Само удаление и последующая блокировка - в TrayContext.DoRemoveDevice.
     public sealed class RemoveDeviceDialog : Form
@@ -5606,9 +5655,22 @@ foreach (string path in oldFiles.Keys)
             _list.IntegralHeight = false;
             _list.HorizontalScrollbar = true;
             _list.SelectionMode = SelectionMode.One;
+            // Моноширинный шрифт - столбцы выровнены (как в журнале).
+            _list.Font = new Font("Consolas", 8.5f);
 
+            // Записи показываются выровненными по столбцам (поле USB ID
+            // убрано намеренно - оно есть во вкладке журнала и мешает выбору).
+            List<string[]> rows = new List<string[]>(_entries.Count);
             foreach (DeviceEntry e in _entries)
-                _list.Items.Add(Format(e));
+            {
+                rows.Add(new string[]
+                {
+                    string.IsNullOrEmpty(e.Name) ? "(без імені)" : e.Name,
+                    string.IsNullOrEmpty(e.Serial) ? string.Empty : "SN: " + e.Serial,
+                    string.IsNullOrEmpty(e.DiskId) ? string.Empty : "Диск: " + e.DiskId
+                });
+            }
+            _list.Items.AddRange(TextAlign.Align(rows, " | ").ToArray());
 
             Button ok = new Button();
             ok.Text = "Видалити";
@@ -5629,19 +5691,6 @@ foreach (string path in oldFiles.Keys)
             this.Controls.Add(cancel);
             this.CancelButton = cancel;
             this.AcceptButton = ok;
-        }
-
-        private static string Format(DeviceEntry e)
-        {
-            StringBuilder sb = new StringBuilder();
-            sb.Append(string.IsNullOrEmpty(e.Name) ? "(без імені)" : e.Name);
-            sb.Append("   USB ID: " +
-                (string.IsNullOrEmpty(e.UsbId) ? "(немає)" : e.UsbId));
-            if (!string.IsNullOrEmpty(e.Serial))
-                sb.Append("   SN: " + e.Serial);
-            if (!string.IsNullOrEmpty(e.DiskId))
-                sb.Append("   Диск: " + e.DiskId);
-            return sb.ToString();
         }
 
         private void Commit()
@@ -5809,13 +5858,22 @@ foreach (string path in oldFiles.Keys)
             lbl.AutoSize = true;
             lbl.Location = new Point(12, 10);
 
-            System.Windows.Forms.ListBox lb = new System.Windows.Forms.ListBox();
-            lb.SetBounds(12, 34, 636, 376);
-            lb.IntegralHeight = false;
-            lb.HorizontalScrollbar = true;
-            lb.SelectionMode = SelectionMode.One;
+            // Моноширинный текст с выровненными по вертикали столбцами
+            // (как в журнале): метка тома, модель, дата добавления.
+            System.Windows.Forms.TextBox box = new System.Windows.Forms.TextBox();
+            box.Font = new Font("Consolas", 8.5f);
+            box.Multiline = true;
+            box.ReadOnly = true;
+            box.WordWrap = false;
+            box.ScrollBars = ScrollBars.Both;
+            box.BackColor = SystemColors.Window;
+            box.ForeColor = SystemColors.WindowText;
+            box.SetBounds(12, 34, 636, 376);
+
+            List<string[]> rows = new List<string[]>(entries.Count);
             foreach (DeviceEntry e in entries)
-                lb.Items.Add(FormatEntry(e, connected, volumeLabels));
+                rows.Add(EntryFields(e, connected, volumeLabels));
+            box.Lines = TextAlign.Align(rows, " | ").ToArray();
 
             Button close = new Button();
             close.Text = "Закрити";
@@ -5824,22 +5882,20 @@ foreach (string path in oldFiles.Keys)
             close.DialogResult = DialogResult.OK;
 
             this.Controls.Add(lbl);
-            this.Controls.Add(lb);
+            this.Controls.Add(box);
             this.Controls.Add(close);
             this.AcceptButton = close;
             this.CancelButton = close;
         }
 
-        // Читаемый вид записи whitelist - только три поля:
+        // Читаемый вид записи whitelist - три поля:
         //   Метка тома (из файловой системы, если накопитель подключён),
         //   Модель накопителя (WMI-модель, если подключён; иначе читается из DiskId),
         //   Дата добавления в whitelist.
-        private static string FormatEntry(DeviceEntry e,
+        private static string[] EntryFields(DeviceEntry e,
             Dictionary<string, UsbVolume> connected,
             Dictionary<string, string> volumeLabels)
         {
-            StringBuilder sb = new StringBuilder();
-
             string key = (e.UsbId ?? string.Empty) + "|" + (e.Serial ?? string.Empty);
             UsbVolume v;
             string label = null;
@@ -5854,14 +5910,16 @@ foreach (string path in oldFiles.Keys)
             if (label == null)
                 label = string.IsNullOrEmpty(e.Name) ? "(не підключено)" : e.Name;
 
-            sb.Append("Мітка тому: \"" + label + "\"");
-            sb.Append("\r\nМодель накопичувача: " +
-                (string.IsNullOrEmpty(model) ? ReadableModel(e.DiskId) : model));
-            if (e.AddedAt != default(DateTime))
-                sb.Append("\r\nДодано: " +
-                    e.AddedAt.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture));
-
-            return sb.ToString();
+            return new string[]
+            {
+                "Мітка тому: \"" + label + "\"",
+                "Модель накопичувача: " +
+                    (string.IsNullOrEmpty(model) ? ReadableModel(e.DiskId) : model),
+                e.AddedAt == default(DateTime)
+                    ? string.Empty
+                    : "Додано: " +
+                      e.AddedAt.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)
+            };
         }
 
         // Читаемая модель из HardwareID диска USBSTOR, e.g.
@@ -6029,21 +6087,24 @@ foreach (string path in oldFiles.Keys)
                     string kind = KindOf(line);
                     if (kind == UsbJournal.KindNote)
                     {
-                        if (shownNotes++ < LimitPerTab) notes.Add(Format(line));
+                        if (shownNotes++ < LimitPerTab) notes.Add(line);
                     }
                     else if (IsFileKind(kind))
                     {
-                        if (shownFiles++ < LimitPerTab) files.Add(Format(line));
+                        if (shownFiles++ < LimitPerTab) files.Add(line);
                     }
                     else
                     {
-                        if (shownDev++ < LimitPerTab) dev.Add(Format(line));
+                        if (shownDev++ < LimitPerTab) dev.Add(line);
                     }
                 }
 
-                SetText(_devices, dev);
-                SetText(_files, files);
-                SetText(_notes, notes);
+                // Показ выравнивается по столбцам: время, вид операции и поля
+                // записи встают друг под друга (см. FormatRecords). Служебные
+                // записи - свободный текст, их поля не выравниваем.
+                SetText(_devices, FormatRecords(dev, true));
+                SetText(_files, FormatRecords(files, true));
+                SetText(_notes, FormatRecords(notes, false));
 
                 _live.Enabled = external;
                 this.Text = external
@@ -6156,16 +6217,68 @@ foreach (string path in oldFiles.Keys)
             return UsbJournal.IsFileKind(kind);
         }
 
-        // Читаемая строка: время, вид операции словами, подробности.
-        private static string Format(string line)
+        // Превращает записи журнала в строки для показа, выравнивая столбцы
+        // по вертикали: время, вид операции словами и поля записи (для
+        // накопителя - SN, Модель, Метка, Решение, Буква; для файла - путь,
+        // размер, SN, Метка) встают друг под друга. Ширину каждого столбца
+        // берём по самой длинной записи, чтобы ни одна не «съехала».
+        private static List<string> FormatRecords(List<string> raw, bool alignColumns)
         {
-            string[] p = line.Split('\t');
-            if (p.Length < 3) return line;
-            string when = p[0];
-            string word = KindText(p[1]);
-            string rest = p[2];
-            // Уравниваем колонку времени, чтобы взгляд шёл ровно.
-            return when.PadRight(19) + " " + word.PadRight(16) + " " + rest;
+            int n = raw.Count;
+            bool[] plain = new bool[n];
+            string[] when = new string[n];
+            string[] word = new string[n];
+            string[][] cols = new string[n][];
+            int whenW = 0, wordW = 0, count = 0;
+
+            for (int i = 0; i < n; i++)
+            {
+                string[] p = raw[i].Split('\t');
+                if (p.Length < 3)
+                {
+                    plain[i] = true;
+                    continue;
+                }
+                when[i] = p[0];
+                word[i] = KindText(p[1]);
+                cols[i] = alignColumns
+                    ? p[2].Split(new string[] { " | " }, StringSplitOptions.None)
+                    : new string[] { p[2] };
+                if (cols[i].Length > count) count = cols[i].Length;
+                if (when[i].Length > whenW) whenW = when[i].Length;
+                if (word[i].Length > wordW) wordW = word[i].Length;
+            }
+
+            int[] width = new int[count];
+            for (int i = 0; i < n; i++)
+            {
+                if (plain[i]) continue;
+                for (int j = 0; j < cols[i].Length; j++)
+                    if (cols[i][j].Length > width[j]) width[j] = cols[i][j].Length;
+            }
+
+            List<string> result = new List<string>(n);
+            for (int i = 0; i < n; i++)
+            {
+                if (plain[i])
+                {
+                    result.Add(raw[i]);
+                    continue;
+                }
+                StringBuilder sb = new StringBuilder();
+                sb.Append(when[i].PadRight(whenW)).Append(' ');
+                sb.Append(word[i].PadRight(wordW)).Append("  ");
+                for (int j = 0; j < cols[i].Length; j++)
+                {
+                    if (j > 0) sb.Append(" | ");
+                    // Последнее поле строки не добиваем пробелами - оно и так
+                    // упирается в конец строки.
+                    if (j < cols[i].Length - 1) sb.Append(cols[i][j].PadRight(width[j]));
+                    else sb.Append(cols[i][j]);
+                }
+                result.Add(sb.ToString());
+            }
+            return result;
         }
 
         private static string KindText(string kind)

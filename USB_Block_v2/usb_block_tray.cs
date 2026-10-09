@@ -21,8 +21,8 @@ using Microsoft.Win32;
 // Версия программы. Та же цифра стоит и в app.manifest (assemblyIdentity):
 // при каждой сборке обновляются ОБЕ, иначе в свойствах файла и в манифесте
 // разойдутся. Проверка - в самопроверке ("Build version").
-[assembly: AssemblyVersion("2.0.0.0")]
-[assembly: AssemblyFileVersion("2.0.0.0")]
+[assembly: AssemblyVersion("2.0.2.0")]
+[assembly: AssemblyFileVersion("2.0.2.0")]
 
 namespace UsbBlockTray
 {
@@ -5572,12 +5572,62 @@ foreach (string path in oldFiles.Keys)
         }
     }
 
-    // Удаление устройства из whitelist: выбор одной записи из списка.
-    // Само удаление и последующая блокировка - в TrayContext.DoRemoveDevice.
+    // Выравнивание записей по столбцам: ширина каждого столбца берётся по
+    // самой длинной записи, поэтому столбцы стоят ровно друг под другом.
+    // Пустые поля в конце строки отбрасываются, последнее поле не добивается
+    // пробелами. Разделитель столбцов задаёт вызывающий код.
+    internal static class TextAlign
+    {
+        public static List<string> Align(List<string[]> rows, string separator)
+        {
+            List<string[]> clean = new List<string[]>(rows.Count);
+            int count = 0;
+            foreach (string[] r in rows)
+            {
+                int len = r.Length;
+                while (len > 0 && string.IsNullOrEmpty(r[len - 1])) len--;
+                string[] c;
+                if (len == r.Length)
+                {
+                    c = r;
+                }
+                else
+                {
+                    c = new string[len];
+                    Array.Copy(r, c, len);
+                }
+                clean.Add(c);
+                if (len > count) count = len;
+            }
+
+            int[] width = new int[count];
+            foreach (string[] r in clean)
+                for (int j = 0; j < r.Length; j++)
+                    if (r[j].Length > width[j]) width[j] = r[j].Length;
+
+            List<string> result = new List<string>(clean.Count);
+            foreach (string[] r in clean)
+            {
+                StringBuilder sb = new StringBuilder();
+                for (int j = 0; j < r.Length; j++)
+                {
+                    if (j > 0) sb.Append(separator);
+                    if (j < r.Length - 1) sb.Append(r[j].PadRight(width[j]));
+                    else sb.Append(r[j]);
+                }
+                result.Add(sb.ToString());
+            }
+            return result;
+        }
+    }
+
+    // Удаление устройств из whitelist: отметка одной или нескольких записей
+    // (кнопка «Обрати всі»). Само удаление и последующая блокировка -
+    // в TrayContext.DoRemoveDevice.
     public sealed class RemoveDeviceDialog : Form
     {
         private readonly List<DeviceEntry> _entries;
-        private readonly System.Windows.Forms.ListBox _list;
+        private readonly System.Windows.Forms.CheckedListBox _list;
         public List<DeviceEntry> Selected { get; private set; }
 
         public RemoveDeviceDialog(List<DeviceEntry> entries)
@@ -5589,7 +5639,7 @@ foreach (string path in oldFiles.Keys)
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
             this.MinimizeBox = false;
-            this.ClientSize = new Size(620, 420);
+            this.ClientSize = new Size(760, 404);
             this.Font = SystemFonts.MessageBoxFont;
             this.AutoScaleDimensions = new SizeF(7F, 15F);   // метрики Segoe UI 9 пт (проектные)
             this.AutoScaleMode = AutoScaleMode.Font;
@@ -5598,63 +5648,78 @@ foreach (string path in oldFiles.Keys)
             lbl.Text = Loc.T("Виберіть пристрій для видалення з WHITELIST:\n") +
                        Loc.T("після видалення його накопичувач буде заблоковано.");
             lbl.AutoSize = false;
-            lbl.Size = new Size(596, 36);
+            lbl.Size = new Size(736, 36);
             lbl.Location = new Point(12, 10);
 
-            _list = new System.Windows.Forms.ListBox();
-            _list.SetBounds(12, 52, 596, 290);
+            _list = new System.Windows.Forms.CheckedListBox();
+            _list.SetBounds(12, 52, 736, 300);
             _list.IntegralHeight = false;
             _list.HorizontalScrollbar = true;
-            _list.SelectionMode = SelectionMode.One;
+            _list.CheckOnClick = true;
+            // Моноширинный шрифт - столбцы выровнены (как в журнале).
+            _list.Font = new Font("Consolas", 8.5f);
 
+            // Записи показываются выровненными по столбцам.
+            List<string[]> rows = new List<string[]>(_entries.Count);
             foreach (DeviceEntry e in _entries)
-                _list.Items.Add(Format(e));
+            {
+                rows.Add(new string[]
+                {
+                    string.IsNullOrEmpty(e.Name) ? Loc.T("(без імені)") : e.Name,
+                    string.IsNullOrEmpty(e.Serial) ? string.Empty : "SN: " + e.Serial,
+                    string.IsNullOrEmpty(e.DiskId) ? string.Empty : Loc.T("Диск: ") + e.DiskId
+                });
+            }
+            _list.Items.AddRange(TextAlign.Align(rows, " | ").ToArray());
+
+            Button selectAll = new Button();
+            selectAll.Text = Loc.T("Обрати всі");
+            selectAll.Size = new Size(110, 28);
+            selectAll.Location = new Point(12, 364);
+            selectAll.Enabled = _entries.Count > 0;
+            selectAll.Click += delegate { SetAllChecked(true); };
 
             Button ok = new Button();
             ok.Text = Loc.T("Видалити");
             ok.Size = new Size(110, 28);
-            ok.Location = new Point(380, 360);
+            ok.Location = new Point(520, 364);
             ok.Enabled = _entries.Count > 0;
             ok.Click += delegate { Commit(); };
 
             Button cancel = new Button();
             cancel.Text = Loc.T("Скасувати");
             cancel.Size = new Size(110, 28);
-            cancel.Location = new Point(498, 360);
+            cancel.Location = new Point(638, 364);
             cancel.DialogResult = DialogResult.Cancel;
 
             this.Controls.Add(lbl);
             this.Controls.Add(_list);
+            this.Controls.Add(selectAll);
             this.Controls.Add(ok);
             this.Controls.Add(cancel);
             this.CancelButton = cancel;
             this.AcceptButton = ok;
         }
 
-        private static string Format(DeviceEntry e)
+        private void SetAllChecked(bool check)
         {
-            StringBuilder sb = new StringBuilder();
-            sb.Append(string.IsNullOrEmpty(e.Name) ? Loc.T("(без імені)") : e.Name);
-            sb.Append("   USB ID: " +
-                (string.IsNullOrEmpty(e.UsbId) ? Loc.T("(немає)") : e.UsbId));
-            if (!string.IsNullOrEmpty(e.Serial))
-                sb.Append("   SN: " + e.Serial);
-            if (!string.IsNullOrEmpty(e.DiskId))
-                sb.Append(Loc.T("   Диск: ") + e.DiskId);
-            return sb.ToString();
+            for (int i = 0; i < _list.Items.Count; i++)
+                _list.SetItemChecked(i, check);
         }
 
         private void Commit()
         {
-            int i = _list.SelectedIndex;
-            if (i < 0 || i >= _entries.Count)
+            Selected = new List<DeviceEntry>();
+            for (int i = 0; i < _entries.Count && i < _list.Items.Count; i++)
+            {
+                if (_list.GetItemChecked(i)) Selected.Add(_entries[i]);
+            }
+            if (Selected.Count == 0)
             {
                 MessageBox.Show(Loc.T("Виберіть пристрій зі списку."),
                     Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
-            Selected = new List<DeviceEntry>();
-            Selected.Add(_entries[i]);
             this.DialogResult = DialogResult.OK;
             this.Close();
         }
@@ -5809,13 +5874,22 @@ foreach (string path in oldFiles.Keys)
             lbl.AutoSize = true;
             lbl.Location = new Point(12, 10);
 
-            System.Windows.Forms.ListBox lb = new System.Windows.Forms.ListBox();
-            lb.SetBounds(12, 34, 636, 376);
-            lb.IntegralHeight = false;
-            lb.HorizontalScrollbar = true;
-            lb.SelectionMode = SelectionMode.One;
+            // Моноширинный текст с выровненными по вертикали столбцами
+            // (как в журнале): метка тома, модель, дата добавления.
+            System.Windows.Forms.TextBox box = new System.Windows.Forms.TextBox();
+            box.Font = new Font("Consolas", 8.5f);
+            box.Multiline = true;
+            box.ReadOnly = true;
+            box.WordWrap = false;
+            box.ScrollBars = ScrollBars.Both;
+            box.BackColor = SystemColors.Window;
+            box.ForeColor = SystemColors.WindowText;
+            box.SetBounds(12, 34, 636, 376);
+
+            List<string[]> rows = new List<string[]>(entries.Count);
             foreach (DeviceEntry e in entries)
-                lb.Items.Add(FormatEntry(e, connected, volumeLabels));
+                rows.Add(EntryFields(e, connected, volumeLabels));
+            box.Lines = TextAlign.Align(rows, " | ").ToArray();
 
             Button close = new Button();
             close.Text = Loc.T("Закрити");
@@ -5824,22 +5898,20 @@ foreach (string path in oldFiles.Keys)
             close.DialogResult = DialogResult.OK;
 
             this.Controls.Add(lbl);
-            this.Controls.Add(lb);
+            this.Controls.Add(box);
             this.Controls.Add(close);
             this.AcceptButton = close;
             this.CancelButton = close;
         }
 
-        // Читаемый вид записи whitelist - только три поля:
+        // Читаемый вид записи whitelist - три поля:
         //   Метка тома (из файловой системы, если накопитель подключён),
         //   Модель накопителя (WMI-модель, если подключён; иначе читается из DiskId),
         //   Дата добавления в whitelist.
-        private static string FormatEntry(DeviceEntry e,
+        private static string[] EntryFields(DeviceEntry e,
             Dictionary<string, UsbVolume> connected,
             Dictionary<string, string> volumeLabels)
         {
-            StringBuilder sb = new StringBuilder();
-
             string key = (e.UsbId ?? string.Empty) + "|" + (e.Serial ?? string.Empty);
             UsbVolume v;
             string label = null;
@@ -5854,14 +5926,16 @@ foreach (string path in oldFiles.Keys)
             if (label == null)
                 label = string.IsNullOrEmpty(e.Name) ? Loc.T("(не підключено)") : e.Name;
 
-            sb.Append(Loc.T("Мітка тому: \"") + label + "\"");
-            sb.Append(Loc.T("\r\nМодель накопичувача: ") +
-                (string.IsNullOrEmpty(model) ? ReadableModel(e.DiskId) : model));
-            if (e.AddedAt != default(DateTime))
-                sb.Append(Loc.T("\r\nДодано: ") +
-                    e.AddedAt.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture));
-
-            return sb.ToString();
+            return new string[]
+            {
+                Loc.T("Мітка тому: \"") + label + "\"",
+                Loc.T("Модель накопичувача: ") +
+                    (string.IsNullOrEmpty(model) ? ReadableModel(e.DiskId) : model),
+                e.AddedAt == default(DateTime)
+                    ? string.Empty
+                    : Loc.T("Додано: ") +
+                      e.AddedAt.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)
+            };
         }
 
         // Читаемая модель из HardwareID диска USBSTOR, e.g.
@@ -6029,21 +6103,24 @@ foreach (string path in oldFiles.Keys)
                     string kind = KindOf(line);
                     if (kind == UsbJournal.KindNote)
                     {
-                        if (shownNotes++ < LimitPerTab) notes.Add(Format(line));
+                        if (shownNotes++ < LimitPerTab) notes.Add(line);
                     }
                     else if (IsFileKind(kind))
                     {
-                        if (shownFiles++ < LimitPerTab) files.Add(Format(line));
+                        if (shownFiles++ < LimitPerTab) files.Add(line);
                     }
                     else
                     {
-                        if (shownDev++ < LimitPerTab) dev.Add(Format(line));
+                        if (shownDev++ < LimitPerTab) dev.Add(line);
                     }
                 }
 
-                SetText(_devices, dev);
-                SetText(_files, files);
-                SetText(_notes, notes);
+                // Показ выравнивается по столбцам: время, вид операции и поля
+                // записи встают друг под друга (см. FormatRecords). Служебные
+                // записи - свободный текст, их поля не выравниваем.
+                SetText(_devices, FormatRecords(dev, true));
+                SetText(_files, FormatRecords(files, true));
+                SetText(_notes, FormatRecords(notes, false));
 
                 _live.Enabled = external;
                 this.Text = external
@@ -6156,16 +6233,108 @@ foreach (string path in oldFiles.Keys)
             return UsbJournal.IsFileKind(kind);
         }
 
-        // Читаемая строка: время, вид операции словами, подробности.
-        private static string Format(string line)
+        // Превращает записи журнала в строки для показа, выравнивая столбцы
+        // по вертикали: время, вид операции словами и поля записи (для
+        // накопителя - SN, Модель, Метка, Решение, Буква; для файла - путь,
+        // размер, SN, Метка) встают друг под друга. Ширину каждого столбца
+        // берём по самой длинной записи, чтобы ни одна не «съехала».
+        private static List<string> FormatRecords(List<string> raw, bool alignColumns)
         {
-            string[] p = line.Split('\t');
-            if (p.Length < 3) return line;
-            string when = p[0];
-            string word = KindText(p[1]);
-            string rest = p[2];
-            // Уравниваем колонку времени, чтобы взгляд шёл ровно.
-            return when.PadRight(19) + " " + word.PadRight(16) + " " + rest;
+            int n = raw.Count;
+            bool[] plain = new bool[n];
+            string[] when = new string[n];
+            string[] word = new string[n];
+            string[][] cols = new string[n][];
+            int whenW = 0, wordW = 0, count = 0;
+
+            for (int i = 0; i < n; i++)
+            {
+                string[] p = raw[i].Split('\t');
+                if (p.Length < 3)
+                {
+                    plain[i] = true;
+                    continue;
+                }
+                when[i] = p[0];
+                word[i] = KindText(p[1]);
+                if (alignColumns)
+                {
+                    // Записи хранятся с постоянными метками полей (Модель=,
+                    // Метка=, Решение= и т.п. - их читает самопроверка),
+                    // поэтому английские подписи подставляются только при
+                    // показе, а не при записи.
+                    string[] parts = p[2].Split(new string[] { " | " }, StringSplitOptions.None);
+                    for (int k = 0; k < parts.Length; k++) parts[k] = FieldLabel(parts[k]);
+                    cols[i] = parts;
+                }
+                else
+                {
+                    cols[i] = new string[] { p[2] };
+                }
+                if (cols[i].Length > count) count = cols[i].Length;
+                if (when[i].Length > whenW) whenW = when[i].Length;
+                if (word[i].Length > wordW) wordW = word[i].Length;
+            }
+
+            int[] width = new int[count];
+            for (int i = 0; i < n; i++)
+            {
+                if (plain[i]) continue;
+                for (int j = 0; j < cols[i].Length; j++)
+                    if (cols[i][j].Length > width[j]) width[j] = cols[i][j].Length;
+            }
+
+            List<string> result = new List<string>(n);
+            for (int i = 0; i < n; i++)
+            {
+                if (plain[i])
+                {
+                    result.Add(raw[i]);
+                    continue;
+                }
+                StringBuilder sb = new StringBuilder();
+                sb.Append(when[i].PadRight(whenW)).Append(' ');
+                sb.Append(word[i].PadRight(wordW)).Append("  ");
+                for (int j = 0; j < cols[i].Length; j++)
+                {
+                    if (j > 0) sb.Append(" | ");
+                    // Последнее поле строки не добиваем пробелами - оно и так
+                    // упирается в конец строки.
+                    if (j < cols[i].Length - 1) sb.Append(cols[i][j].PadRight(width[j]));
+                    else sb.Append(cols[i][j]);
+                }
+                result.Add(sb.ToString());
+            }
+            return result;
+        }
+
+        // Подписи полей в записи журнала хранятся на украинском/русском
+        // ("Модель=", "Метка=", "Решение=", "Буква=", "Размер=") - их
+        // читает самопроверка и разбор. Для английского интерфейса подписи
+        // (и значение "разрешён"/"заблокирован") переводятся только при
+        // показе; сами данные не меняются. Незнакомые поля (путь файла,
+        // "SN=") возвращаются как есть.
+        private static string FieldLabel(string col)
+        {
+            if (string.IsNullOrEmpty(col)) return col;
+            int eq = col.IndexOf('=');
+            if (eq < 0) return col;
+            string label = col.Substring(0, eq + 1);
+            string value = col.Substring(eq + 1);
+            if (label == "Модель=") return Loc.T("Модель=") + value;
+            if (label == "Метка=") return Loc.T("Метка=") + value;
+            if (label == "Буква=") return Loc.T("Буква=") + value;
+            if (label == "Решение=") return Loc.T("Решение=") + Loc.T(value);
+            if (label == "Размер=") return Loc.T("Размер=") + TranslateSize(value);
+            return col;
+        }
+
+        private static string TranslateSize(string value)
+        {
+            const string unit = " байт";
+            if (value.EndsWith(unit, StringComparison.Ordinal))
+                return value.Substring(0, value.Length - unit.Length) + Loc.T(unit);
+            return value;
         }
 
         private static string KindText(string kind)
