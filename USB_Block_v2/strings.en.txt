@@ -431,3 +431,6 @@ WHITELIST порожній - видаляти нічого.	WHITELIST is empty -
 Размер=	Size=
 разрешён	allowed
 заблокирован	blocked
+USB-блокування: контроль роботи служби моніторингу	USB blocking: monitoring service control
+Задача контролю служби (--ensure-service): 	Service guard task (--ensure-service): 
+Служба та сповіщувач перезапускаються автоматично, якщо їх завершити.	The service and notifier restart automatically if terminated.

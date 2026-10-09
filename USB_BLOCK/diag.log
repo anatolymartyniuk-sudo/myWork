@@ -1,23 +1,18 @@
 ﻿Файл цього лога: D:\Work\USB_BLOCK\diag.log
 USB_Block tray - діагностика
-Час: 10/08/2026 15:47:18
+Час: 10/09/2026 14:25:24
 Адміністратор: False
 Захищена копія: C:\Program Files\USB_Block\usb_block_tray.exe  існує=True
 Служба моніторингу: Stopped
 Задача трея (--logon): є
 Задача сповіщувача (--notify): є
+Задача контролю служби (--ensure-service): немає
 Процес-сповіщувач: не знайдено
 Подія блокування (черга): записів=6, макс.id=6, LastEventId(HKCU)=6
 Джерело журналу подій (UsbBlockMonitor): зареєстровано
 Запис у чергу (HKLM\SOFTWARE\USB_Block\Events): НІ (Отказано в доступе к разделу реестра "HKEY_LOCAL_MACHINE\SOFTWARE\USB_Block\Events".)
 Лог показу сповіщень (хвіст usb_block_notify.log з %TEMP% і Windows\Temp):
   [C:\Users\odmin\AppData\Local\Temp\usb_block_notify.log]
-  10:29:38.852 горячая клавиша: запущен просмотр журнала (--journal)
-  10:35:36.098 горячая клавиша: запущен просмотр журнала (--journal)
-  10:14:05.424 горячая клавиша: запущен просмотр журнала (--journal)
-  10:24:44.034 записано событие id=1 (SN=001CC0C60CF5BCB1831E0184)
-  10:24:47.040 в очереди показа 1, новых с id>0 до 1
-  10:24:47.040 показ id=1
   10:24:48.152 показано уведомление id=1
   10:25:39.405 в очереди показа 1, новых с id>1 до 2
   10:25:39.407 показ id=2
@@ -37,6 +32,12 @@ USB_Block tray - діагностика
   12:51:35.445 в очереди показа 1, новых с id>5 до 6
   12:51:35.456 показ id=6
   12:51:36.495 показано уведомление id=6
+  16:14:28.195 гаряча клавіша: запущено перегляд журналу (--journal)
+  10:38:10.750 гаряча клавіша: запущено перегляд журналу (--journal)
+  11:03:11.201 hotkey: journal viewer launched (--journal)
+  11:14:05.539 hotkey: journal viewer launched (--journal)
+  12:28:43.898 гаряча клавіша: запущено перегляд журналу (--journal)
+  12:55:30.804 hotkey: journal viewer launched (--journal)
 
 --- Політика ---
 Блокування активне: True
@@ -48,8 +49,8 @@ USB_Block tray - діагностика
 Розмір кільця кожного журналу: 10 файлів по 5000 записів (два незалежні журнали: підключення і копіювання)
 Файл підключень: C:\ProgramData\USB_Block\journal.dat  існує=True
 Файл копіювання: C:\ProgramData\USB_Block\journal_files.dat  існує=False
-Поколінь: 10  записів усього: 22 (підключень і службових: 22, файлових: 0)  у поточних файлах: 22  розмір усього: 8564 байт
-Веде журнал: цикл спостереження оновлюється, останній 54 хв тому (трей або служба)
+Поколінь: 10  записів усього: 27 (підключень і службових: 27, файлових: 0)  у поточних файлах: 27  розмір усього: 10534 байт
+Веде журнал: цикл спостереження оновлюється, останній 19 хв тому (трей або служба)
 Право дописувати в журнал у цього процесу: True
 Останній опит: файлів 0, томів обрізано за лімітом 0
 Основна клавіша журналу: Ctrl+Alt+O  -> Ctrl=True Alt=True Shift=False Win=False клавіша=0x4F
@@ -57,12 +58,11 @@ USB_Block tray - діагностика
 
 --- WHITELIST ---
 Файл: C:\ProgramData\USB_Block\whitelist.dat
-Записів: 5
+Записів: 4
   NAME=WIN7PRO_RU_DVD  USB=USB\VID_1005&PID_B128  SN=CCYYMMDDHHMMSSW3HSSI  DISK=USBSTOR\DiskUSB3.0__FLASH_DRIVE_____1100
   NAME=191  USB=USB\VID_8564&PID_1000  SN=081NS9HV47JMZLUQ  DISK=USBSTOR\DiskJetFlashTranscend_8GB___1100
   NAME=190  USB=USB\VID_058F&PID_6387  SN=CDEE658E  DISK=USBSTOR\Disk________USB_Disk________8.07
   NAME=192  USB=USB\VID_8564&PID_1000  SN=41KAXI78HFCSUCJF  DISK=USBSTOR\DiskJetFlashTranscend_8GB___1100
-  NAME=Алексей  USB=USB\VID_0951&PID_1693  SN=001CC0C60CF5BCB1831E0184  DISK=USBSTOR\DiskKingstonDataTraveler_111PMAP
 
 --- USB-диски (підключені) ---
 Знайдено: 0

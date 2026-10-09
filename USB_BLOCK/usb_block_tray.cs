@@ -21,8 +21,8 @@ using Microsoft.Win32;
 // Версия программы. Та же цифра стоит и в app.manifest (assemblyIdentity):
 // при каждой сборке обновляются ОБЕ, иначе в свойствах файла и в манифесте
 // разойдутся. Проверка - в самопроверке ("Build version").
-[assembly: AssemblyVersion("1.82.0.0")]
-[assembly: AssemblyFileVersion("1.82.0.0")]
+[assembly: AssemblyVersion("1.83.0.0")]
+[assembly: AssemblyFileVersion("1.83.0.0")]
 
 namespace UsbBlockTray
 {
@@ -53,6 +53,7 @@ namespace UsbBlockTray
             bool notify = false;
             bool testpopup = false;
             bool journal = false;
+            bool ensureService = false;
 
             foreach (string a in args)
             {
@@ -80,6 +81,18 @@ namespace UsbBlockTray
                 if (string.Equals(a, "--journal", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(a, "-journal", StringComparison.OrdinalIgnoreCase))
                     journal = true;
+                if (string.Equals(a, "--ensure-service", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(a, "-ensure-service", StringComparison.OrdinalIgnoreCase))
+                    ensureService = true;
+            }
+
+            // КОНТРОЛЬ СЛУЖБЫ (--ensure-service): запускается задачей
+            // планировщика от SYSTEM раз в минуту. Если службу остановили
+            // или отключили, поднимает её обратно. Без UI.
+            if (ensureService)
+            {
+                ServiceManager.EnsureRunning();
+                return 0;
             }
 
             // ПРОСМОТР ЖУРНАЛА (--journal): только окно, без трея, без
@@ -6344,6 +6357,7 @@ foreach (string path in oldFiles.Keys)
     {
         public const string TaskName = "USB_Block_Tray_Logon";
         public const string NotifyTaskName = "USB_Block_Notify_Logon";
+        public const string GuardTaskName = "USB_Block_Guard";
 
         // Задачи регистрируются через COM-интерфейс Планировщика заданий
         // (Schedule.Service), а не через вызов schtasks.exe: эвристика
@@ -6363,6 +6377,11 @@ foreach (string path in oldFiles.Keys)
             return TaskInstalled(NotifyTaskName);
         }
 
+        public static bool GuardInstalled()
+        {
+            return TaskInstalled(GuardTaskName);
+        }
+
         private static bool TaskInstalled(string name)
         {
             try
@@ -6380,20 +6399,35 @@ foreach (string path in oldFiles.Keys)
         public static string Create()
         {
             List<string> errors = new List<string>();
-            string t = CreateOne(TaskName, "--logon");
+            string t = CreateOne(TaskName, "--logon", false);
             if (t != null) errors.Add("задача трея: " + t);
-            string n = CreateOne(NotifyTaskName, "--notify");
+            string n = CreateOne(NotifyTaskName, "--notify", true);
             if (n != null) errors.Add("задача сповіщень: " + n);
+            string g = CreateGuardTask();
+            if (g != null) errors.Add("задача контролю служби: " + g);
             if (errors.Count == 0) return null;
             return string.Join("\n", errors.ToArray());
         }
 
-        private static string CreateOne(string taskName, string args)
+        // Создать/обновить задачу контроля службы (--ensure-service от SYSTEM).
+        // null = успех, иначе текст ошибки. Идемпотентно: пересоздаёт задачу.
+        public static string CreateGuardTask()
         {
-            string xml = BuildXml(args);
+            string xml = BuildGuardXml();
+            return CreateTask(GuardTaskName, xml, 5, "SYSTEM");
+        }
+
+        private static string CreateOne(string taskName, string args, bool repeat)
+        {
+            string xml = BuildXml(args, repeat);
+            return CreateTask(taskName, xml, 4, null);
+        }
+
+        private static string CreateTask(string taskName, string xml, int logonType, object user)
+        {
             try
             {
-                RegisterViaCom(taskName, xml);
+                RegisterViaCom(taskName, xml, logonType, user);
                 return null;
             }
             catch (Exception ex)
@@ -6428,6 +6462,12 @@ foreach (string path in oldFiles.Keys)
         {
             DeleteOne(TaskName);
             DeleteOne(NotifyTaskName);
+            DeleteOne(GuardTaskName);
+        }
+
+        public static void DeleteGuard()
+        {
+            DeleteOne(GuardTaskName);
         }
 
         private static void DeleteOne(string taskName)
@@ -6478,15 +6518,16 @@ foreach (string path in oldFiles.Keys)
             }
         }
 
-        private static void RegisterViaCom(string taskName, string xml)
+        private static void RegisterViaCom(string taskName, string xml, int logonType, object user)
         {
             object folder = GetRootFolder();
             Type ft = folder.GetType();
-            // флаги версии 0; CREATE_OR_UPDATE; пользователь/пароль не нужны
-            // (принципала задаёт XML - группа); TASK_LOGON_GROUP (4);
-            // sddl = null.
+            // флаги: TASK_CREATE_OR_UPDATE (6) - повторная регистрация
+            // обновляет существующую задачу, а не падает с "уже есть";
+            // принципала задаёт XML; logonType: 4 = TASK_LOGON_GROUP (группа
+            // Users), 5 = TASK_LOGON_SERVICE_ACCOUNT (SYSTEM); sddl = null.
             ft.InvokeMember("RegisterTask", BindingFlags.InvokeMethod, null, folder,
-                new object[] { taskName, xml, 2, null, null, 4, null });
+                new object[] { taskName, xml, 6, user, null, logonType, null });
         }
 
         private static void DeleteViaCom(string taskName)
@@ -6503,7 +6544,7 @@ foreach (string path in oldFiles.Keys)
             }
         }
 
-        private static string BuildXml(string args)
+        private static string BuildXml(string args, bool repeat)
         {
             // Задача на группу "Users" (S-1-5-32-545): срабатывает при входе
             // любого пользователя, с его токеном и наивысшим доступным уровнем
@@ -6515,6 +6556,14 @@ foreach (string path in oldFiles.Keys)
             // "The task XML contains a value which is incorrectly formatted or
             // out of range" - воспроизведено и проверено тестом регистрации.
             string command = "\"" + ProtectedCopy.InstallExe + "\"";
+            // Для задачи сповіщувача добавляем повтор раз в минуту: если
+            // пользователь завершит процесс сповіщувача, он поднимется снова.
+            string repetition = repeat
+                ? "      <Repetition>\r\n" +
+                  "        <Interval>PT1M</Interval>\r\n" +
+                  "        <StopAtDurationEnd>false</StopAtDurationEnd>\r\n" +
+                  "      </Repetition>\r\n"
+                : string.Empty;
             return
                 "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n" +
                 "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n" +
@@ -6524,6 +6573,7 @@ foreach (string path in oldFiles.Keys)
                 "  <Triggers>\r\n" +
                 "    <LogonTrigger>\r\n" +
                 "      <Enabled>true</Enabled>\r\n" +
+                repetition +
                 "    </LogonTrigger>\r\n" +
                 "  </Triggers>\r\n" +
                 "  <Principals>\r\n" +
@@ -6558,6 +6608,73 @@ foreach (string path in oldFiles.Keys)
                 "    </Exec>\r\n" +
                 "  </Actions>\r\n" +
                 "</Task>\r\n";
+        }
+
+        // Задача контроля службы: раз в минуту от имени SYSTEM запускает
+        // --ensure-service, который поднимает службу, если её остановили или
+        // отключили. Скрытая, без ограничения времени выполнения.
+        private static string BuildGuardXml()
+        {
+            string command = "\"" + ProtectedCopy.InstallExe + "\"";
+            return
+                "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n" +
+                "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n" +
+                "  <RegistrationInfo>\r\n" +
+                "    <Description>USB-блокування: контроль роботи служби моніторингу</Description>\r\n" +
+                "  </RegistrationInfo>\r\n" +
+                "  <Triggers>\r\n" +
+                "    <TimeTrigger>\r\n" +
+                "      <Repetition>\r\n" +
+                "        <Interval>PT1M</Interval>\r\n" +
+                "        <StopAtDurationEnd>false</StopAtDurationEnd>\r\n" +
+                "      </Repetition>\r\n" +
+                "      <StartBoundary>2020-01-01T00:00:00</StartBoundary>\r\n" +
+                "      <Enabled>true</Enabled>\r\n" +
+                "    </TimeTrigger>\r\n" +
+                "  </Triggers>\r\n" +
+                "  <Principals>\r\n" +
+                "    <Principal id=\"Author\">\r\n" +
+                "      <UserId>S-1-5-18</UserId>\r\n" +
+                "      <RunLevel>HighestAvailable</RunLevel>\r\n" +
+                "    </Principal>\r\n" +
+                "  </Principals>\r\n" +
+                "  <Settings>\r\n" +
+                "    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\r\n" +
+                "    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\r\n" +
+                "    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\r\n" +
+                "    <AllowHardTerminate>true</AllowHardTerminate>\r\n" +
+                "    <StartWhenAvailable>true</StartWhenAvailable>\r\n" +
+                "    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>\r\n" +
+                "    <IdleSettings>\r\n" +
+                "      <StopOnIdleEnd>false</StopOnIdleEnd>\r\n" +
+                "      <RestartOnIdle>false</RestartOnIdle>\r\n" +
+                "    </IdleSettings>\r\n" +
+                "    <AllowStartOnDemand>true</AllowStartOnDemand>\r\n" +
+                "    <Enabled>true</Enabled>\r\n" +
+                "    <Hidden>true</Hidden>\r\n" +
+                "    <RunOnlyIfIdle>false</RunOnlyIfIdle>\r\n" +
+                "    <WakeToRun>false</WakeToRun>\r\n" +
+                "    <ExecutionTimeLimit>PT1M</ExecutionTimeLimit>\r\n" +
+                "    <Priority>7</Priority>\r\n" +
+                "  </Settings>\r\n" +
+                "  <Actions Context=\"Author\">\r\n" +
+                "    <Exec>\r\n" +
+                "      <Command>" + command + "</Command>\r\n" +
+                "      <Arguments>--ensure-service</Arguments>\r\n" +
+                "    </Exec>\r\n" +
+                "  </Actions>\r\n" +
+                "</Task>\r\n";
+        }
+
+        // Тестові хуки для --selftest (чисті перевірки без реєстрації задач).
+        internal static string GuardXmlForTest()
+        {
+            return BuildGuardXml();
+        }
+
+        internal static string NotifyXmlForTest()
+        {
+            return BuildXml("--notify", true);
         }
     }
 
@@ -8684,11 +8801,78 @@ foreach (string path in oldFiles.Keys)
                     return "Не вдалося створити службу (код " +
                         ret.ToString(CultureInfo.InvariantCulture) + ")";
                 Start();
+                ApplyRecovery();
                 return null;
             }
             catch (Exception ex)
             {
                 return ex.Message;
+            }
+        }
+
+        // Настроить автоматический перезапуск службы средствами SCM: если
+        // процесс службы завершится аварийно (в т.ч. его "Убить" в диспетчере
+        // задач), Windows поднимет службу заново. Первый сбой - через 5 c,
+        // последующие - через 30 c; счётчик сбоев сбрасывается раз в сутки.
+        public static void ApplyRecovery()
+        {
+            try
+            {
+                string output;
+                Exec.Run("sc.exe", "failure " + ServiceName +
+                    " reset= 86400 actions= restart/5000/restart/30000/restart/30000",
+                    out output);
+            }
+            catch
+            {
+            }
+        }
+
+        // Снять настройку перезапуска (перед удалением службы, чтобы она не
+        // пыталась подняться снова).
+        public static void ClearRecovery()
+        {
+            try
+            {
+                string output;
+                Exec.Run("sc.exe",
+                    "failure " + ServiceName + " reset= 0 actions= \"\"", out output);
+            }
+            catch
+            {
+            }
+        }
+
+        // Контроль службы (режим --ensure-service, запускается задачей от
+        // SYSTEM раз в минуту): если службу остановили или отключили -
+        // вернуть её в рабочее состояние.
+        public static void EnsureRunning()
+        {
+            try
+            {
+                if (!IsInstalled()) return;
+                try
+                {
+                    using (ManagementObject svc = new ManagementObject(
+                        @"\\.\root\cimv2:Win32_Service.Name='" + ServiceName + "'"))
+                    {
+                        object startMode = svc["StartMode"];
+                        if (startMode != null && !string.Equals(
+                            startMode.ToString(), "Auto", StringComparison.OrdinalIgnoreCase))
+                        {
+                            ManagementBaseObject inParams = svc.GetMethodParameters("Change");
+                            inParams["StartMode"] = "Automatic";
+                            svc.InvokeMethod("Change", inParams, null);
+                        }
+                    }
+                }
+                catch
+                {
+                }
+                Start();
+            }
+            catch
+            {
             }
         }
 
@@ -8716,6 +8900,7 @@ foreach (string path in oldFiles.Keys)
             try
             {
                 if (!IsInstalled()) return null;
+                ClearRecovery();
                 using (ServiceController sc = new ServiceController(ServiceName))
                 {
                     if (sc.Status != ServiceControllerStatus.Stopped &&
@@ -8766,6 +8951,15 @@ foreach (string path in oldFiles.Keys)
 
         protected override void OnStart(string[] args)
         {
+            // Самоконтроль: при каждом запуске службы гарантируем настройку
+            // автоматического перезапуска (SCM) и наличие задачи контроля
+            // (--ensure-service). Это же служит миграцией для установок,
+            // сделанных до появления защиты: служба сама создаёт свою задачу.
+            try { ServiceManager.ApplyRecovery(); }
+            catch { }
+            try { TrayTask.CreateGuardTask(); }
+            catch { }
+
             _timer = new System.Timers.Timer(2000);
             _timer.AutoReset = true;
             _timer.Elapsed += OnTick;
@@ -8855,6 +9049,8 @@ foreach (string path in oldFiles.Keys)
                 (TrayTask.IsInstalled() ? "є" : "немає"));
             sb.AppendLine("Задача сповіщувача (--notify): " +
                 (TrayTask.NotifyInstalled() ? "є" : "немає"));
+            sb.AppendLine("Задача контролю служби (--ensure-service): " +
+                (TrayTask.GuardInstalled() ? "є" : "немає"));
             sb.AppendLine("Процес-сповіщувач: " +
                 (NotifyRunning() ? "працює" : "не знайдено"));
             sb.AppendLine("Подія блокування (черга): " + EventsSummary());
@@ -10140,6 +10336,29 @@ foreach (string path in oldFiles.Keys)
                 catch (Exception ex)
                 {
                     sb.AppendLine("Hotkey parse ERROR: " + ex.Message);
+                }
+
+                // XML задач защиты: задача контроля службы (--ensure-service,
+                // от SYSTEM, раз в минуту) и повтор у задачи сповіщувача.
+                try
+                {
+                    string gx = TrayTask.GuardXmlForTest();
+                    string nx = TrayTask.NotifyXmlForTest();
+                    bool guardOk =
+                        gx.IndexOf("S-1-5-18", StringComparison.Ordinal) >= 0 &&
+                        gx.IndexOf("--ensure-service", StringComparison.Ordinal) >= 0 &&
+                        gx.IndexOf("<Interval>PT1M</Interval>", StringComparison.Ordinal) >= 0;
+                    bool notifyOk =
+                        nx.IndexOf("<Repetition>", StringComparison.Ordinal) >= 0 &&
+                        nx.IndexOf("<Interval>PT1M</Interval>", StringComparison.Ordinal) >= 0;
+                    bool guardAll = guardOk && notifyOk;
+                    sb.AppendLine("Task guard XML (SYSTEM + --ensure-service + повтор): " +
+                        (guardAll ? "OK" : "FAIL") +
+                        " (guard=" + guardOk + " notify_repeat=" + notifyOk + ")");
+                }
+                catch (Exception ex)
+                {
+                    sb.AppendLine("Task guard XML ERROR: " + ex.Message);
                 }
             }
             finally
