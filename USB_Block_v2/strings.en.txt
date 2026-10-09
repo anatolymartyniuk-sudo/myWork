@@ -1,0 +1,422 @@
+\n\nПеренесіть .wlb на інший комп'ютер і виберіть «Імпортувати WHITELIST».	\n\nMove the .wlb to another computer and choose "Import WHITELIST".
+\n\nЯкщо ви бачите це вікно в правому нижньому кутку екрана, показ працює.	\n\nIf you see this window in the bottom-right corner of the screen, the display works.
+\nУвага: журнал підключень увімкнути не вдалося	\nWarning: the connection journal could not be enabled
+\r\nДодано: 	\r\nAdded: 
+\r\nМодель накопичувача: 	\r\nDrive model: 
+    <Description>USB-блокування: значок у треї та сповіщення про блокування для всіх користувачів</Description>\r\n	    <Description>USB blocking: tray icon and block notifications for all users</Description>\r\n
+   Диск: 	   Disk: 
+   Записи старші за поріг показу не показані.	   Records older than the display threshold are not shown.
+   Показано: пристроїв 	   Shown: devices 
+   Розмір: 	   Size: 
+  (НЕ РОЗПІЗНАЄТЬСЯ, не спрацює)	  (NOT RECOGNIZED, will not work)
+  - whitelist (список дозволених пристроїв)\n	  - whitelist (list of allowed devices)\n
+  - журнал підключень і копіювань\n	  - connection and copy journal\n
+  - задачу значків у треї для користувачів (якщо була)\n	  - per-user tray icon tasks (if any)\n
+  - захищену копію в "Program Files\\USB_Block"\n	  - protected copy in "Program Files\\USB_Block"\n
+  - пароль захисту меню\n	  - menu protection password\n
+  - політику блокування USB-пристроїв\n	  - USB device blocking policy\n
+  - сам файл програми	  - the program file itself
+  - службу моніторингу (якщо встановлено)\n	  - monitoring service (if installed)\n
+  2 Розблокувати пристрої	  2 Unblock devices
+  2 Розблокувати пристрої\n	  2 Unblock devices\n
+  3 Додати пристрій	  3 Add device
+  3 Додати пристрій\n	  3 Add device\n
+  4 Видалити пристрій із WHITELIST	  4 Remove device from WHITELIST
+  4 Видалити пристрій із WHITELIST\n	  4 Remove device from WHITELIST\n
+  6 Імпортувати WHITELIST	  6 Import WHITELIST
+  6 Імпортувати WHITELIST\n	  6 Import WHITELIST\n
+  8 Видалити службу	  8 Remove service
+  8 Видалити службу\n	  8 Remove service\n
+  9 Видалити застосунок	  9 Remove application
+  <немає лога - показ ще не запускався>	  <no log - the display has not run yet>
+  «Ні»        - додати до поточного whitelist (об'єднати)	  "No"        - add to the current whitelist (merge)
+  «Ні»        - підтвердити кодовим словом (якщо пароль забуто)	  "No"        - confirm with the code word (if the password is forgotten)
+  «Скасувати» - нічого не робити	  "Cancel" - do nothing
+  «Скасувати» - скасувати	  "Cancel" - cancel
+  «Так»       - перезаписати (замінити) поточний whitelist	  "Yes"       - overwrite (replace) the current whitelist
+  «Так»       - підтвердити поточним паролем	  "Yes"       - confirm with the current password
+  Ім'я пристрою: 	  Device name: 
+  Додано: 	  Added: 
+  Модель пристрою: 	  Device model: 
+  Серійний номер: 	  Serial number: 
+  Серійний номер: не визначено (запис дозволяє всю модель 	  Serial number: not determined (the entry allows the whole model 
+  Тип пристрою (ID): 	  Device type (ID): 
+  журнал веде інший процес: 	  journal is kept by another process: 
+  запис неможливий: 	  recording is impossible: 
+  записів усього: 	  records total: 
+  помилка видачі прав: 	  permission grant error: 
+  помилка реєстрації: 	  registration error: 
+  помилка читання: 	  read error: 
+  розмір усього: 	  total size: 
+  у поточних файлах: 	  in current files: 
+ (додаткову не зареєстровано)	 (additional one not registered)
+ (код 	 (code 
+ (підключень і службових: 	 (connections and service records: 
+ (трей або служба)	 (tray or service)
+ / службових 	 / service records 
+ / файлів 	 / files 
+ | ДОЗВОЛЕНО: 	 | ALLOWED: 
+ байт	 bytes
+ встановлена, але 	 installed, but 
+ год тому	 h ago
+ до 	 to 
+ з %TEMP% і Windows\\Temp):	 from %TEMP% and Windows\\Temp):
+ зайнята іншою програмою (код 	 busy with another program (code 
+ записів (два незалежні журнали: підключення і копіювання)	 records (two independent journals: connections and copying)
+ записів), а зсувати покоління може лише адміністратор - 	 records), and only an administrator can rotate the generation - 
+ записів.	 records.
+ працює.\n	 running.\n
+ пристроїв.	 devices.
+ с тому	 s ago
+ с тому, вікно 	 s ago, window 
+ с)	 s)
+ символів і містити малі та ВЕЛИКІ латинські літери та цифри.	 characters and contain lowercase and UPPERCASE Latin letters and digits.
+ файлів по 	 files of 
+ хв тому	 min ago
+ і 	 and 
+(«Ні» - повернутися до вибору комбінації)	("No" - return to the combination selection)
+(без вмісту файлів і без імені користувача).\n	(without file contents and without the user name).\n
+(без мітки)	(no label)
+(без імені)	(no name)
+(вимкнено)	(disabled)
+(заблоковано)	(blocked)
+(не підключено)	(not connected)
+(немає)	(none)
+(увімкнено	(enabled
+) - журнал веде трей, якщо він запущений	) - the journal is kept by the tray, if running
+), а збіглися HardwareID диска або модель USB. Якщо це ІНШИЙ накопичувач - 	), but the disk HardwareID or USB model matched. If this is a DIFFERENT drive - 
+): витягую останню подію id=	): pulling the last event id=
+, додано 	, added 
+, макс.id=	, max id=
+, нових з id>	, new with id>
+, стало 	, became 
+, томів обрізано за лімітом 	, volumes truncated by limit 
+, файлових: 	, file records: 
+- показано раніше записані записи.   	- previously recorded entries are shown.   
+--- USB-вузли масової пам'яті ---	--- USB mass storage nodes ---
+--- USB-диски (підключені) ---	--- USB disks (connected) ---
+--- Журнал підключень і копіювань ---	--- Connection and copy journal ---
+--- Політика ---	--- Policy ---
+--- Смонтувані томи USB (точки монтування) ---	--- Mounted USB volumes (mount points) ---
+--- Усі мас-сторадж вузли (реєстр) ---	--- All mass storage nodes (registry) ---
+. Усі USB-накопичувачі доступні.	. All USB drives are allowed.
+0 Переглянути WHITELIST...	0 View WHITELIST...
+1 Блокувати пристрої	1 Block devices
+1. Ім'я Пристрою	1. Device Name
+2 Розблокувати пристрої	2 Unblock devices
+2. Тип Пристрою (ID):	2. Device Type (ID):
+3 Додати пристрій	3 Add device
+3. Модель Пристрою (Vendor ID):	3. Device Model (Vendor ID):
+4 Видалити пристрій із WHITELIST...	4 Remove device from WHITELIST...
+5 Експортувати WHITELIST...	5 Export WHITELIST...
+6 Імпортувати WHITELIST...	6 Import WHITELIST...
+7 Встановити службу	7 Install service
+8 Видалити службу	8 Remove service
+9 Видалити застосунок...	9 Remove application...
+: знімок оновлено після 	: snapshot updated after 
+COM-тип Schedule.Service не знайдено	COM type Schedule.Service not found
+J Вести журнал копіювання	J Keep copy journal
+J Вести журнал копіювання 	J Keep copy journal 
+USB-блокування	USB blocking
+USB-блокування (моніторинг)	USB blocking (monitoring)
+USB_Block tray - діагностика	USB_Block tray - diagnostics
+UsbBlock whitelist (*.wlb)|*.wlb|Усі файли (*.*)|*.*	UsbBlock whitelist (*.wlb)|*.wlb|All files (*.*)|*.*
+WHITELIST - дозволені USB-накопичувачі	WHITELIST - allowed USB drives
+WHITELIST експортовано:\n	WHITELIST exported:\n
+WHITELIST замінено: 	WHITELIST replaced: 
+WHITELIST об'єднано:\n	WHITELIST merged:\n
+WHITELIST порожній - видаляти нічого.	WHITELIST is empty - nothing to remove.
+«Ні» - лишити попередній пароль.	"No" - keep the previous password.
+Імпорт WHITELIST	Import WHITELIST
+Імпортовано записів (пристроїв): 	Imported entries (devices): 
+Адміністратор: 	Administrator: 
+БЛОКУВАННЯ ВИМКНЕНО	BLOCKING DISABLED
+БЛОКУВАННЯ УВІМКНЕНО	BLOCKING ENABLED
+Без підтвердження ці файли лишаться на місці	Without confirmation these files will remain in place
+Блокування активне: 	Blocking active: 
+Блокування вимкнено. Томів відновлено: 	Blocking disabled. Volumes restored: 
+Блокування увімкнено. Чужі USB-накопичувачі залишатимуться без літери диска.	Blocking enabled. Foreign USB drives will remain without a drive letter.
+Буде видалено:\n	Will be removed:\n
+ВІДКРИТО ФАЙЛ: 	FILE OPENED: 
+ВЕДЕННЯ ЖУРНАЛУ ВИМКНЕНО (немає встановленої служби) 	JOURNALING DISABLED (no service installed) 
+ВИМКНЕНО (галочка пункту J в меню трея) - записи про файли не пишуться	DISABLED (J item checkbox in the tray menu) - file records are not written
+ВИМКНЕНО - записи про підключення не пишуться	DISABLED - connection records are not written
+Введіть кодове слово:	Enter the code word:
+Введіть пароль для доступу до цього пункту меню:	Enter the password to access this menu item:
+Введіть пароль.	Enter the password.
+Введіть поточний пароль:	Enter the current password:
+Веде журнал: 	Journal kept by: 
+Виберіть USB-накопичувач:	Select a USB drive:
+Виберіть пристрій для видалення з WHITELIST:\n	Select a device to remove from WHITELIST:\n
+Виберіть пристрій зі списку.	Select a device from the list.
+Видалення пароля	Password removal
+Видалено з WHITELIST: 	Removed from WHITELIST: 
+Видалити	Remove
+Видалити з WHITELIST і заблокувати?\n\n	Remove from WHITELIST and block?\n\n
+Видалити застосунок?\n\r	Remove the application?\n\r
+Видалити збережені дані?\n	Remove saved data?\n
+Видалити пароль	Remove password
+Видалити пароль захисту?	Remove the protection password?
+Видалити пристрій із WHITELIST	Remove device from WHITELIST
+Вихід	Exit
+Встановити новий пароль зараз?	Set a new password now?
+Встановити пароль для захисту небезпечних пунктів меню?	Set a password to protect dangerous menu items?
+Встановлення пароля	Setting the password
+Відкрити файл журналу	Open the journal file
+Відкрити файл...	Open file...
+Джерело журналу подій (	Event log source (
+До журналу	To journal
+Додайте основну клавішу (наприклад Ctrl+Alt+U).	Add the main key (for example Ctrl+Alt+U).
+Додано пристроїв: 	Devices added: 
+Додати	Add
+Додати пристрій	Add device
+Додаткова клавіша журналу (галочка J): 	Additional journal key (J checkbox): 
+Додаткову комбінацію знято, основну 	Additional combination cleared, the main one 
+Додаткову комбінацію не задано.\n\n	No additional combination is set.\n\n
+Дозволених пристроїв: 	Allowed devices: 
+Дозволено до монтування: 	Allowed to mount: 
+Дублікатів у попередньому whitelist прибрано: 	Duplicates removed from the previous whitelist: 
+Дублікатів у поточному whitelist буде прибрано: 	Duplicates to remove from the current whitelist: 
+Дублікатів у файлі відкинуто: 	Duplicates discarded in the file: 
+Експорт WHITELIST (перенос на інший комп'ютер)	Export WHITELIST (transfer to another computer)
+Журнал USB-блокування	USB blocking journal
+Журнал USB-блокування - 	USB blocking journal - 
+Журнал відкривається клавішами 	The journal opens with the keys 
+Журнал закрито для звичайного користувача.\n	The journal is closed for a regular user.\n
+Журнал копіювання ВИМКНЕНО.\n	Copy journal DISABLED.\n
+Журнал копіювання УВІМКНЕНО.\n	Copy journal ENABLED.\n
+Журнал копіювання буде увімкнено, і відкривати його можна\n	The copy journal will be enabled, and it can be opened\n
+Журнал копіювання вимкнено (меню трея, пункт J) - 	Copy journal disabled (tray menu, J item) - 
+Журнал копіювання вмикається галочкою пункту J.\n	The copy journal is enabled by the J item checkbox.\n
+Журнал копіювання увімкнено, але записати в нього неможливо.\n	The copy journal is enabled, but writing to it is impossible.\n
+Журнал копіювання: 	Copy journal: 
+Журнал підключень ВИМКНЕНО.\n	Connection journal DISABLED.\n
+Журнал підключень УВІМКНЕНО автоматично.\n	Connection journal ENABLED automatically.\n
+Журнал підключень: 	Connection journal: 
+Заблоковано зараз: 	Blocked now: 
+Заблоковано пристрій	Device blocked
+Заблоковано пристрій: 	Device blocked: 
+Забутий пароль видаляється пунктом «Видалити пароль».	A forgotten password is removed by the "Remove password" item.
+Задайте пароль для пунктів 2, 3, 4, 6, 8, 9.\n	Set a password for items 2, 3, 4, 6, 8, 9.\n
+Задати...	Set...
+Задача сповіщувача (--notify): 	Notifier task (--notify): 
+Задача трея (--logon): 	Tray task (--logon): 
+Закрити	Close
+Запам'ятайте пароль: він зберігається лише у вигляді хеша.	Remember the password: it is stored only as a hash.
+Запис у чергу (HKLM\\SOFTWARE\\USB_Block\\Events): 	Queue write (HKLM\\SOFTWARE\\USB_Block\\Events): 
+Записуються: скопійовані, змінені, видалені\n	Recorded: copied, changed, deleted\n
+Записів: 	Records: 
+Запустіть програму з правами адміністратора або встановіть\n	Run the program as administrator or install\n
+Захищена копія: 	Protected copy: 
+Зберігається 10 файлів по 5000 записів.\n	10 files of 5000 records each are stored.\n
+Знайдено: 	Found: 
+Значок у треї в користувачів буде прибрано після перезавантаження.	The tray icon for users will be removed after a reboot.
+Значок у треї та сповіщення з'являться в усіх користувачів\n	The tray icon and notifications will appear for all users\n
+Його запитуватиметься в пунктах:\n	It will be requested for the items:\n
+Керування доступне лише адміністраторам	Management is available only to administrators
+Клавіша Win не використовується. Esc - скасування захоплення.	The Win key is not used. Esc - cancel capturing.
+Клавіша Win у комбінації для журналу не використовується - 	The Win key is not used in the journal combination - 
+Кодове слово:	Code word:
+Комбінація клавіш для журналу	Keyboard combination for the journal
+Комбінація, якою відкривається журнал підключень	The combination that opens the connection journal
+Копіювати	Copy
+Лог показу сповіщень (хвіст 	Notification display log (tail 
+Мітка тому: "	Volume label: "
+НІ (	NO (
+НІХТО НЕ ВЕДЕ: службу не встановлено і трей не запущено - 	NOBODY KEEPS IT: the service is not installed and the tray is not running - 
+НЕ зареєстровано	NOT registered
+Нагляд за томом 	Watching volume 
+Накопичувач дозволено і він отримає літеру диска автоматично.	The drive is allowed and will get a drive letter automatically.
+Накопичувач уже дозволено. Щоб внести зміни, спочатку видаліть 	The drive is already allowed. To make changes, first remove 
+Натисніть «Задати...» і наберіть комбінацію, наприклад Ctrl+Alt+U.	Click "Set..." and type a combination, for example Ctrl+Alt+U.
+Натисніть «Задати...», щоб замінити комбінацію.	Click "Set..." to replace the combination.
+Не вдалося видалити службу (код 	Failed to remove the service (code 
+Не вдалося видалити файл пароля:\n	Failed to remove the password file:\n
+Не вдалося відкрити журнал з правами адміністратора.	Failed to open the journal with administrator rights.
+Не вдалося відкрити журнал: 	Failed to open the journal: 
+Не вдалося зберегти whitelist:\n	Failed to save the whitelist:\n
+Не вдалося зберегти додаткову комбінацію:\n	Failed to save the additional combination:\n
+Не вдалося зберегти пароль:\n	Failed to save the password:\n
+Не вдалося змінити налаштування журналу:\n	Failed to change the journal settings:\n
+Не вдалося оновити захищену копію для служби:\n	Failed to update the protected copy for the service:\n
+Не вдалося отримати права адміністратора.	Failed to obtain administrator rights.
+Не вдалося отримати права адміністратора.\n	Failed to obtain administrator rights.\n
+Не вдалося показати тестове сповіщення: 	Failed to show the test notification: 
+Не вдалося прочитати журнал: 	Failed to read the journal: 
+Не вдалося прочитати файл 	Failed to read the file 
+Не вдалося прочитати файл:\n	Failed to read the file:\n
+Не вдалося створити службу (код 	Failed to create the service (code 
+Невірне кодове слово.\nЗалишилося спроб: 	Invalid code word.\nAttempts left: 
+Невірний пароль.\nЗалишилося спроб: 	Invalid password.\nAttempts left: 
+Немає USB-накопичувачів.\n	No USB drives.\n
+Новий Пристрій	New Device
+Новий пароль:	New password:
+ОК	OK
+Оновити	Refresh
+Основна клавіша журналу: 	Main journal key: 
+Останній опит: файлів 	Last poll: files 
+ПОМИЛКА показу: 	DISPLAY ERROR: 
+ПОМИЛКА створення вікна: 	WINDOW CREATION ERROR: 
+ПРИСТРІЙ ЗАБЛОКОВАНО, ЗВЕРНІТЬСЯ ДО АДМІНІСТРАТОРА СЗІ	DEVICE BLOCKED, CONTACT THE INFORMATION SECURITY ADMINISTRATOR
+Пароль видалено.\n\n	Password removed.\n\n
+Пароль встановлено.\n\n	Password set.\n\n
+Пароль запитуватиметься при:	The password will be requested for:
+Пароль захисту	Protection password
+Пароль захисту вже встановлено.	A protection password is already set.
+Пароль захисту меню: 	Menu protection password: 
+Пароль має бути не коротшим за 	The password must be at least 
+Пароль не встановлено - видаляти нічого.	No password is set - nothing to remove.
+Пароль:	Password:
+Паролі не збігаються.	The passwords do not match.
+Перевищено число спроб введення кодового слова.\nПароль не видалено.	Too many code word attempts.\nThe password was not removed.
+Перевищено число спроб введення пароля.\nПароль не видалено.	Too many password attempts.\nThe password was not removed.
+Перевищено число спроб введення пароля.\nПункт не виконано.	Too many password attempts.\nThe item was not executed.
+Повторіть пароль:	Repeat the password:
+Подія блокування (черга): 	Block event (queue): 
+Поколінь: 	Generations: 
+Помилка блокування:\n	Blocking error:\n
+Помилка видалення пристрою:\n	Device removal error:\n
+Помилка експорту:\n	Export error:\n
+Помилка журналу: 	Journal error: 
+Помилка збереження:\n	Save error:\n
+Помилка перегляду whitelist:\n	Whitelist view error:\n
+Помилка розблокування:\n	Unblock error:\n
+Помилка спостереження: 	Monitoring error: 
+Помилка читання (очікувано без прав адміністратора): 	Read error (expected without administrator rights): 
+Помилка:\n	Error:\n
+Помилка: 	Error: 
+Поточний whitelist: 	Current whitelist: 
+Потрібен хоча б один із Ctrl, Alt, Shift - інакше 	At least one of Ctrl, Alt, Shift is required - otherwise 
+Потрібне основне поле і хоча б один із Ctrl, Alt, Shift. 	A main key and at least one of Ctrl, Alt, Shift are required. 
+Потрібні права адміністратора.	Administrator rights are required.
+Право дописувати в журнал у цього процесу: 	This process's right to append to the journal: 
+Пристрій більше не дозволено і блокуватиметься.	The device is no longer allowed and will be blocked.
+Програму вже запущено (значок у треї).	The program is already running (tray icon).
+Програму видалено.	The application has been removed.
+Пропущено (накопичувач уже був у whitelist): 	Skipped (the drive was already in the whitelist): 
+Процес-сповіщувач: 	Notifier process: 
+Пункти 2, 3, 4, 6, 8, 9 тепер доступні без пароля.	Items 2, 3, 4, 6, 8, 9 are now available without a password.
+Підключений накопичувач розмонтовано, але щоб він\n	The connected drive was unmounted, but for it to\n
+Підключення накопичувачів	Drive connections
+Підключіть накопичувач і повторіть.	Connect a drive and try again.
+Після видалення пункти 2, 3, 4, 6, 8, 9 будуть	After removal, items 2, 3, 4, 6, 8, 9 will be
+Розмір кільця кожного журналу: 	Ring size of each journal: 
+СТАТУС: 	STATUS: 
+Скасувати	Cancel
+Служба моніторингу: 	Monitoring service: 
+Службові записи	Service records
+Службу встановлено, але не вдалося налаштувати значок у треї\n	The service was installed, but the tray icon could not be configured\n
+Службу моніторингу видалено.\n	The monitoring service has been removed.\n
+Службу моніторингу встановлено та запущено від імені SYSTEM.\n	The monitoring service has been installed and started as SYSTEM.\n
+ТЕСТ сповіщення про блокування.\n\n	TEST of the block notification.\n\n
+У whitelist уже записано:	Already recorded in the whitelist:
+У пристрою немає USB-ідентифікатора - його не можна додати.	The device has no USB identifier - it cannot be added.
+УВІМКНЕНО (вмикається встановленням служби, вимкається її видаленням)	ENABLED (turned on by installing the service, turned off by removing it)
+УВІМКНЕНО (галочка пункту J в меню трея)	ENABLED (J item checkbox in the tray menu)
+Увага: загальне блокування ВИМКНЕНО.\n	Warning: general blocking is DISABLED.\n
+Увага: комбінацію клавіш журналу зберегти не вдалося	Warning: the journal key combination could not be saved
+Увага: серійні номери відрізняються (	Warning: the serial numbers differ (
+Уже накопичені записи лишаються - їх можна відкрити.	Already accumulated records remain - they can be opened.
+Усі файли (*.*)|*.*	All files (*.*)|*.*
+Файл копіювання: 	Copy file: 
+Файл не містить жодного пристрою - імпорт скасовано.	The file contains no devices - import canceled.
+Файл підключень: 	Connections file: 
+Файл цього лога: 	This log's file: 
+Файл: 	File: 
+Файли журналу (journal*.dat)|journal*.dat|	Journal files (journal*.dat)|journal*.dat|
+Файли на накопичувачах	Files on drives
+Цей накопичувач уже є в whitelist - повторно додавати не потрібно.	This drive is already in the whitelist - no need to add it again.
+Ця клавіша не підходить як основна (Ctrl, Alt 	This key is not suitable as the main one (Ctrl, Alt 
+Час: 	Time: 
+Як застосувати імпортовані дані?	How to apply the imported data?
+або встановіть службу моніторингу)	or install the monitoring service)
+блокувався і надалі, увімкніть пункт «1 Блокувати пристрої».	to keep it blocked, enable the "1 Block devices" item.
+було 	was 
+вигрузки значка з трея.\n	of the icon from the tray.\n
+видалено	deleted
+виявлено	detected
+встановлено	installed
+відключено	disconnected
+відпустіть її і наберіть комбінацію ще раз.	release it and type the combination again.
+гаряча клавіша: запущено перегляд журналу (--journal)	hotkey: journal viewer launched (--journal)
+гаряча клавіша: не вдалося запустити перегляд журналу	hotkey: failed to launch the journal viewer
+дедуплікація при записі: пропуск повторного 	deduplication on write: skipping a repeated 
+для інших користувачів:\n	for other users:\n
+доступні без пароля.	are available without a password.
+експортуйте whitelist заново зі старого комп'ютера	export the whitelist again from the old computer
+журнал вимкнено (пункт J в меню трея)	journal disabled (J item in the tray menu)
+журнал не поповнюватиметься	the journal will not be updated
+з правами адміністратора (пункт J або встановлення служби)	with administrator rights (J item or service installation)
+задача сповіщень: 	notifications task: 
+задача трея: 	tray task: 
+запис призупинено (запустіть програму з його правами 	recording suspended (run the program with its rights 
+запис: 	record: 
+записано подію id=	recorded event id=
+запуск з правами адміністратора (або служба моніторингу)	launch with administrator rights (or the monitoring service)
+зареєстровано	registered
+змінено	changed
+зупинена (	stopped (
+комбінація 	combination 
+комбінація перехоплюватиме звичайний набір тексту.	the combination will intercept normal typing.
+лише основною комбінацією 	only with the main combination 
+лічильник попереду черги (last=	counter ahead of the queue (last=
+на іншій машині або іншим шифруванням (DPAPI)	on another machine or with different encryption (DPAPI)
+натисніть клавіші...	press the keys...
+не вдалося визначити (	failed to determine (
+не визначено	not determined
+не вказано файл журналу	no journal file specified
+не встановлена	not installed
+не встановлено	not set
+не задана	not set
+не знайдено	not found
+не схожий на файл журналу USB_Block (	does not look like a USB_Block journal file (
+невідома версія whitelist	unknown whitelist version
+невідомий формат файлу whitelist	unknown whitelist file format
+невірна сигнатура файлу whitelist	invalid whitelist file signature
+невірно збережена комбінація: 	incorrectly saved combination: 
+недоступна (	unavailable (
+немає	none
+немає прав на запис у реєстр	no rights to write to the registry
+немає прав на запис у файл журналу - їх видає перший 	no rights to write to the journal file - they are granted by the first 
+немає файлу журналу - його створить перший запуск 	no journal file - the first launch will create it 
+перенесено	moved
+перерви, змін за час простою не записано	interruptions and changes during downtime were not recorded
+показ id=	display id=
+показано сповіщення id=	notification shown id=
+помилка читання: 	read error: 
+пошкоджений заголовок файлу журналу	corrupted journal file header
+працює	running
+підключено	connected
+після видалення його накопичувач буде заблоковано.	after removal its drive will be blocked.
+після перезавантаження. Сповіщення працюють незалежно від\n	after a reboot. Notifications work independently of\n
+після чого додайте цей заново.	after which add this one again.
+ротація: 	rotation: 
+скопійовано	copied
+служба	service
+служба 	service 
+службове	service record
+службу моніторингу (пункт 7).	the monitoring service (item 7).
+сповіщення (той самий накопичувач, подія була 	notification (same drive, the event was 
+спочатку видаліть старий запис (пункт «4 Видалити пристрій із WHITELIST»), 	first remove the old entry ("4 Remove device from WHITELIST" item), 
+старий запис (пункт «4 Видалити пристрій із WHITELIST»).	the old entry ("4 Remove device from WHITELIST" item).
+трей (адміністратор)	tray (administrator)
+трей (звичайний користувач)	tray (regular user)
+трей (поточний користувач)	tray (current user)
+трей: 	tray: 
+у черзі показу 	in the display queue 
+файл журналу заповнений (	the journal file is full (
+файл журналу не знайдено: 	journal file not found: 
+файл журналу ще не створено: 	the journal file has not been created yet: 
+файл замалий	file too small
+файл захищено паролем - парольний захист видалено; 	the file is password-protected - the password protection was removed; 
+файл не розшифровується: він зроблений 	the file does not decrypt: it was made 
+файлові записи не оновлюються.   	file records are not updated.   
+цикл спостереження оновлюється, останній 	the monitoring cycle is updating, the last 
+шифрування: 	encryption: 
+щойно	just now
+є	yes
+і Shift задаються як додаток). Виберіть звичайну клавішу.	and Shift are set as modifiers). Choose an ordinary key.
+і перейменовані файли на дозволених накопичувачах\n	and files renamed on allowed drives\n
+Мова / Language	Мова / Language
+Поточна мова: 	Current language: 
+Відсутні ключі англійської (missing English): 	Missing English keys: 

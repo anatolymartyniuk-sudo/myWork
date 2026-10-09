@@ -1,0 +1,104 @@
+﻿This log's file: D:\Work\USB_Block_v2\diag.log
+USB_Block tray - diagnostics
+Time: 10/09/2026 09:59:15
+Administrator: False
+Protected copy: C:\Program Files\USB_Block\usb_block_tray.exe  існує=True
+Monitoring service: Stopped
+Tray task (--logon): yes
+Notifier task (--notify): yes
+Notifier process: not found
+Block event (queue): записів=6, max id=6, LastEventId(HKCU)=6
+Event log source (UsbBlockMonitor): registered
+Queue write (HKLM\SOFTWARE\USB_Block\Events): NO (Отказано в доступе к разделу реестра "HKEY_LOCAL_MACHINE\SOFTWARE\USB_Block\Events".)
+Notification display log (tail usb_block_notify.log from %TEMP% and Windows\Temp):
+  [C:\Users\odmin\AppData\Local\Temp\usb_block_notify.log]
+  10:35:36.098 горячая клавиша: запущен просмотр журнала (--journal)
+  10:14:05.424 горячая клавиша: запущен просмотр журнала (--journal)
+  10:24:44.034 записано событие id=1 (SN=001CC0C60CF5BCB1831E0184)
+  10:24:47.040 в очереди показа 1, новых с id>0 до 1
+  10:24:47.040 показ id=1
+  10:24:48.152 показано уведомление id=1
+  10:25:39.405 в очереди показа 1, новых с id>1 до 2
+  10:25:39.407 показ id=2
+  10:25:40.647 показано уведомление id=2
+  10:39:31.427 в очереди показа 1, новых с id>2 до 3
+  10:39:31.432 показ id=3
+  10:39:32.178 показано уведомление id=3
+  11:36:38.886 записано событие id=4 (SN=1234567890ABCDEF)
+  11:36:39.887 в очереди показа 1, новых с id>3 до 4
+  11:36:39.895 показ id=4
+  11:36:41.087 показано уведомление id=4
+  12:06:08.474 записано событие id=5 (SN=1234567890ABCDEF)
+  12:06:11.948 в очереди показа 1, новых с id>4 до 5
+  12:06:11.948 показ id=5
+  12:06:13.138 показано уведомление id=5
+  12:51:32.048 записано событие id=6 (SN=1234567890ABCDEF)
+  12:51:35.445 в очереди показа 1, новых с id>5 до 6
+  12:51:35.456 показ id=6
+  12:51:36.495 показано уведомление id=6
+  16:14:28.195 гаряча клавіша: запущено перегляд журналу (--journal)
+
+--- Policy ---
+Blocking active: True
+Menu protection password: installed
+
+--- Connection and copy journal ---
+Connection journal: ENABLED (turned on by installing the service, turned off by removing it)
+Copy journal: DISABLED (J item checkbox in the tray menu) - file records are not written
+Ring size of each journal: 10 files of 5000 records (two independent journals: connections and copying)
+Connections file: C:\ProgramData\USB_Block\journal.dat  існує=True
+Copy file: C:\ProgramData\USB_Block\journal_files.dat  існує=False
+Generations: 10  records total: 22 (connections and service records: 22, file records: 0)  in current files: 22  total size: 8564 bytes
+Journal kept by: the monitoring cycle is updating, the last 1 h ago (tray or service)
+This process's right to append to the journal: True
+Last poll: files 0, volumes truncated by limit 0
+Main journal key: Ctrl+Alt+O  -> Ctrl=True Alt=True Shift=False Win=False клавіша=0x4F
+Additional journal key (J checkbox): not set
+
+--- Мова / Language ---
+Current language: en
+Missing English keys: 0
+
+
+--- WHITELIST ---
+File: C:\ProgramData\USB_Block\whitelist.dat
+Records: 5
+  NAME=WIN7PRO_RU_DVD  USB=USB\VID_1005&PID_B128  SN=CCYYMMDDHHMMSSW3HSSI  DISK=USBSTOR\DiskUSB3.0__FLASH_DRIVE_____1100
+  NAME=191  USB=USB\VID_8564&PID_1000  SN=081NS9HV47JMZLUQ  DISK=USBSTOR\DiskJetFlashTranscend_8GB___1100
+  NAME=190  USB=USB\VID_058F&PID_6387  SN=CDEE658E  DISK=USBSTOR\Disk________USB_Disk________8.07
+  NAME=192  USB=USB\VID_8564&PID_1000  SN=41KAXI78HFCSUCJF  DISK=USBSTOR\DiskJetFlashTranscend_8GB___1100
+  NAME=Алексей  USB=USB\VID_0951&PID_1693  SN=001CC0C60CF5BCB1831E0184  DISK=USBSTOR\DiskKingstonDataTraveler_111PMAP
+
+--- USB disks (connected) ---
+Found: 0
+
+--- Mounted USB volumes (mount points) ---
+Found: 0
+
+--- USB mass storage nodes ---
+Found: 0
+
+--- All mass storage nodes (registry) ---
+Found: 22
+  USBSTOR\Disk&Ven_&Prod_USB_Disk&Rev_8.07\CDEE658E&0
+  USBSTOR\Disk&Ven_&Prod_USB_DISK_2.0&Rev_PMAP\07011327AC49A566&0
+  USBSTOR\Disk&Ven_&Prod_USB_FLASH_DRIVE&Rev_PMAP\071C41215D05A883&0
+  USBSTOR\Disk&Ven_ASolid&Prod_USB&Rev_\32663616&0
+  USBSTOR\Disk&Ven_DEMO&Prod_MMC_Storage&Rev_2.3\1234567890ABCDEF&1
+  USBSTOR\Disk&Ven_JetFlash&Prod_Transcend_8GB&Rev_1100\081NS9HV47JMZLUQ&0
+  USBSTOR\Disk&Ven_JetFlash&Prod_Transcend_8GB&Rev_1100\41KAXI78HFCSUCJF&0
+  USBSTOR\Disk&Ven_Kingston&Prod_DataTraveler_111&Rev_PMAP\001CC0C60CF5BCB1831E0184&0
+  USBSTOR\Disk&Ven_Kingston&Prod_DataTraveler_2.0&Rev_PMAP\C860008863E7ED801A1100C7&0
+  USBSTOR\Disk&Ven_USB3.0&Prod_FLASH_DRIVE&Rev_1100\CCYYMMDDHHmmSSW3HSSI&0
+  USBSTOR\Disk&Ven_USB3.0&Prod_FLASH_DRIVE&Rev_PMAP\071C5564838EC626&0
+  USB\VID_058F&PID_6387\CDEE658E
+  USB\VID_0930&PID_6545\C860008863E7ED801A1100C7
+  USB\VID_0951&PID_1693\001CC0C60CF5BCB1831E0184
+  USB\VID_1005&PID_B113\071C41215D05A883
+  USB\VID_1005&PID_B128\071C5564838EC626
+  USB\VID_1005&PID_B128\CCYYMMDDHHmmSSW3HSSI
+  USB\VID_13FE&PID_4300\07011327AC49A566
+  USB\VID_19D2&PID_1225\1234567890ABCDEF
+  USB\VID_24A9&PID_205A\32663616
+  USB\VID_8564&PID_1000\081NS9HV47JMZLUQ
+  USB\VID_8564&PID_1000\41KAXI78HFCSUCJF
