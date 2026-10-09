@@ -1,6 +1,6 @@
 ﻿This log's file: D:\Work\USB_Block_v2\diag.log
 USB_Block tray - diagnostics
-Time: 10/09/2026 14:20:59
+Time: 10/09/2026 17:19:05
 Administrator: False
 Protected copy: C:\Program Files\USB_Block\usb_block_tray.exe  існує=True
 Monitoring service: Stopped
@@ -49,8 +49,8 @@ Copy journal: DISABLED (J item checkbox in the tray menu) - file records are not
 Ring size of each journal: 10 files of 5000 records (two independent journals: connections and copying)
 Connections file: C:\ProgramData\USB_Block\journal.dat  існує=True
 Copy file: C:\ProgramData\USB_Block\journal_files.dat  існує=False
-Generations: 10  records total: 27 (connections and service records: 27, file records: 0)  in current files: 27  total size: 10534 bytes
-Journal kept by: the monitoring cycle is updating, the last 15 min ago (tray or service)
+Generations: 10  records total: 28 (connections and service records: 28, file records: 0)  in current files: 28  total size: 10928 bytes
+Journal kept by: the monitoring cycle is updating, the last 11 min ago (tray or service)
 This process's right to append to the journal: True
 Last poll: files 0, volumes truncated by limit 0
 Main journal key: Ctrl+Alt+O  -> Ctrl=True Alt=True Shift=False Win=False клавіша=0x4F

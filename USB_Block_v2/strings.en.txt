@@ -434,3 +434,7 @@ WHITELIST порожній - видаляти нічого.	WHITELIST is empty -
 USB-блокування: контроль роботи служби моніторингу	USB blocking: monitoring service control
 Задача контролю служби (--ensure-service): 	Service guard task (--ensure-service): 
 Служба та сповіщувач перезапускаються автоматично, якщо їх завершити.	The service and notifier restart automatically if terminated.
+Службу вже встановлено: налаштування оновлено\n	Service already installed: settings updated\n
+(автоперезапуск і задачі відновлено).	(auto-restart and tasks have been restored).
+Службу вже встановлено, але частину налаштувань\n	The service is already installed, but some settings\n
+відновити не вдалося:\n	could not be restored:\n

@@ -21,8 +21,8 @@ using Microsoft.Win32;
 // Версия программы. Та же цифра стоит и в app.manifest (assemblyIdentity):
 // при каждой сборке обновляются ОБЕ, иначе в свойствах файла и в манифесте
 // разойдутся. Проверка - в самопроверке ("Build version").
-[assembly: AssemblyVersion("1.83.0.0")]
-[assembly: AssemblyFileVersion("1.83.0.0")]
+[assembly: AssemblyVersion("1.84.0.0")]
+[assembly: AssemblyFileVersion("1.84.0.0")]
 
 namespace UsbBlockTray
 {
@@ -250,6 +250,17 @@ namespace UsbBlockTray
                 // (UsbJournalRights.EnsureAllOnce в RunOnce) - файлы могли
                 // быть созданы позже.
                 UsbJournalRights.EnsureAllOnce();
+
+                // Оновлення "на льоту": якщо служба вже встановлена (у т.ч.
+                // версією БЕЗ захисту), вмикаємо її захист і оновлюємо задачі
+                // Планувальника. Так після оновлення exe захист вмикається при
+                // першому ж запуску адміністратором - без ручного перевстановлення
+                // служби (кнопка "7" на встановленій службі нічого не робила).
+                if (ServiceManager.IsInstalled())
+                {
+                    ServiceManager.ApplyRecovery();
+                    TrayTask.Create();
+                }
             }
 
             bool created;
@@ -7586,7 +7597,20 @@ foreach (string path in oldFiles.Keys)
             if (!EnsureAdmin()) return;
             if (ServiceManager.IsInstalled())
             {
+                // Служба вже встановлена: не виходимо мовчки, а відновлюємо
+                // захист і оновлюємо задачі Планувальника (потрібно після
+                // оновлення exe, щоб увімкнути автоперезапуск і задачу
+                // контролю, якщо їх не було).
+                ServiceManager.ApplyRecovery();
+                string rep = TrayTask.Create();
                 RefreshServiceMenu();
+                _icon.ShowBalloonTip(3000, Program.Title,
+                    rep == null
+                        ? "Службу вже встановлено: налаштування оновлено\n" +
+                          "(автоперезапуск і задачі відновлено)."
+                        : "Службу вже встановлено, але частину налаштувань\n" +
+                          "відновити не вдалося:\n" + rep,
+                    rep == null ? ToolTipIcon.Info : ToolTipIcon.Warning);
                 return;
             }
             // Пароль защиты спрашивается ДО установки службы: отмена в окне
@@ -8940,6 +8964,7 @@ foreach (string path in oldFiles.Keys)
     {
         private System.Timers.Timer _timer;
         private bool _busy;
+        private int _healTicks;
 
         public UsbBlockService()
         {
@@ -9017,6 +9042,20 @@ foreach (string path in oldFiles.Keys)
                 // Решает мьютекс, дублей не будет.
                 try { UsbJournalMonitor.RunOnce(true); }
                 catch { }
+
+                // Самовідновлення захисту: раз на хвилину (таймер 2 с x30)
+                // повертаємо налаштування автоперезапуску і перестворюємо
+                // задачу контролю, якщо її видалили чи вимкнули. Служба працює
+                // від SYSTEM, тому разом із задачею "USB_Block_Guard" утворюється
+                // "взаємне лікування": задача піднімає службу, служба - задачу.
+                if (++_healTicks >= 30)
+                {
+                    _healTicks = 0;
+                    try { ServiceManager.ApplyRecovery(); }
+                    catch { }
+                    try { TrayTask.CreateGuardTask(); }
+                    catch { }
+                }
             }
             catch
             {
