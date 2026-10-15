@@ -21,8 +21,8 @@ using Microsoft.Win32;
 // Версия программы. Та же цифра стоит и в app.manifest (assemblyIdentity):
 // при каждой сборке обновляются ОБЕ, иначе в свойствах файла и в манифесте
 // разойдутся. Проверка - в самопроверке ("Build version").
-[assembly: AssemblyVersion("2.0.4.0")]
-[assembly: AssemblyFileVersion("2.0.4.0")]
+[assembly: AssemblyVersion("2.0.5.0")]
+[assembly: AssemblyFileVersion("2.0.5.0")]
 
 namespace UsbBlockTray
 {
@@ -263,16 +263,37 @@ namespace UsbBlockTray
                 }
             }
 
-            bool created;
-            using (Mutex mtx = new Mutex(true, MutexName, out created))
+            // Если значок трея уже запущен в этой сессии - второй экземпляр
+            // не стартуем (просто выходим). Проверяем по имени процесса и
+            // командной строке: то же имя exe носят служба (--service),
+            // уведомитель (--notify) и задача контроля (--ensure-service) -
+            // их за работающий трей не считаем.
+            if (Diag.TrayInstanceRunning()) return 0;
+
+            // Мьютекс трея. Если он занят ДРУГИМ экземпляром - второй значок
+            // не создаём и молча выходим. Учтён и случай, когда экземпляр
+            // запущен с другими правами (например, повышенными): обычный
+            // процесс не может открыть такой мьютекс и получает
+            // UnauthorizedAccessException - это тоже означает "уже запущено",
+            // поэтому не падаем, а тихо завершаемся.
+            Mutex mtx = null;
+            try
             {
+                bool created;
+                mtx = new Mutex(true, MutexName, out created);
                 if (!created)
                 {
-                    MessageBox.Show(Loc.T("Програму вже запущено (значок у треї)."),
-                        Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return 1;
+                    mtx.Dispose();
+                    return 0;
                 }
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return 0;
+            }
 
+            try
+            {
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
 
@@ -286,6 +307,14 @@ namespace UsbBlockTray
                 using (TrayContext ctx = new TrayContext())
                 {
                     Application.Run(ctx);
+                }
+            }
+            finally
+            {
+                if (mtx != null)
+                {
+                    try { mtx.ReleaseMutex(); } catch { }
+                    mtx.Dispose();
                 }
             }
             return 0;
@@ -9535,6 +9564,73 @@ foreach (string path in oldFiles.Keys)
             return false;
         }
 
+        // Запущен ли уже значок трея (usb_block_tray.exe БЕЗ служебных
+        // режимов) в ТЕКУЩЕЙ сессии пользователя. Нужно, чтобы при
+        // перезапуске не появился второй значок. То же имя exe носят служба
+        // (--service), уведомитель (--notify) и задача контроля
+        // (--ensure-service) - их треем не считаем, поэтому проверяем ещё и
+        // командную строку, и номер сессии (служба живёт в сессии 0).
+        internal static bool TrayInstanceRunning()
+        {
+            int myPid;
+            int mySession;
+            using (Process cur = Process.GetCurrentProcess())
+            {
+                myPid = cur.Id;
+                mySession = cur.SessionId;
+            }
+            try
+            {
+                using (ManagementObjectSearcher s = new ManagementObjectSearcher(
+                    "SELECT ProcessId, SessionId, CommandLine FROM Win32_Process " +
+                    "WHERE Name='usb_block_tray.exe'"))
+                {
+                    foreach (ManagementObject mo in s.Get())
+                    {
+                        using (mo)
+                        {
+                            int pid = Convert.ToInt32(mo["ProcessId"],
+                                CultureInfo.InvariantCulture);
+                            if (pid == myPid) continue;
+                            int sid = Convert.ToInt32(mo["SessionId"],
+                                CultureInfo.InvariantCulture);
+                            if (sid != mySession) continue;
+                            string cl = mo["CommandLine"] as string;
+                            if (cl == null) continue;
+                            if (!IsServiceMode(cl)) return true;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return false;
+        }
+
+        // Служебные режимы exe (служба/уведомитель/контроль/разовые) - это
+        // НЕ значок трея.
+        private static bool IsServiceMode(string cmdLine)
+        {
+            string[] flags =
+            {
+                "--service", "-service", "--notify", "-notify",
+                "--ensure-service", "-ensure-service", "--journal", "-journal",
+                "--diag", "-diag", "--selftest", "-selftest",
+                "--testpopup", "-testpopup", "--makecopies", "-makecopies"
+            };
+            foreach (string f in flags)
+                if (cmdLine.IndexOf(f, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+            return false;
+        }
+
+        // Хук для самопроверки: различение служебных режимов и трея.
+        internal static bool IsServiceModeForTest(string cmdLine)
+        {
+            return IsServiceMode(cmdLine);
+        }
+
         // Краткая сводка очереди событий (HKLM\SOFTWARE\USB_Block\Events) и
         // последнего показанного события (HKCU).
         private static string EventsSummary()
@@ -10553,6 +10649,29 @@ foreach (string path in oldFiles.Keys)
                 catch (Exception ex)
                 {
                     sb.AppendLine("Task guard XML ERROR: " + ex.Message);
+                }
+
+                // 7) Различение режимов одного exe: служба (--service),
+                //    уведомитель (--notify) и контроль (--ensure-service) -
+                //    НЕ трей, а --logon и запуск без аргументов - трей. От
+                //    этого зависит, не стартует ли второй значок при
+                //    перезапуске (одно имя exe у всех режимов).
+                try
+                {
+                    bool svc = Diag.IsServiceModeForTest("\"usb_block_tray.exe\" --service");
+                    bool nfy = Diag.IsServiceModeForTest("\"usb_block_tray.exe\" --notify");
+                    bool grd = Diag.IsServiceModeForTest("\"usb_block_tray.exe\" --ensure-service");
+                    bool lgn = Diag.IsServiceModeForTest("\"usb_block_tray.exe\" --logon");
+                    bool pln = Diag.IsServiceModeForTest("\"usb_block_tray.exe\"");
+                    bool modeOk = svc && nfy && grd && !lgn && !pln;
+                    sb.AppendLine("Tray single-instance (служба/уведомитель/контроль != трей): " +
+                        (modeOk ? "OK" : "FAIL") +
+                        " (svc=" + svc + " notify=" + nfy + " guard=" + grd +
+                        " logon=" + lgn + " plain=" + pln + ")");
+                }
+                catch (Exception ex)
+                {
+                    sb.AppendLine("Tray single-instance ERROR: " + ex.Message);
                 }
             }
             finally
