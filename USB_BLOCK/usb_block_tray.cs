@@ -21,8 +21,8 @@ using Microsoft.Win32;
 // Версия программы. Та же цифра стоит и в app.manifest (assemblyIdentity):
 // при каждой сборке обновляются ОБЕ, иначе в свойствах файла и в манифесте
 // разойдутся. Проверка - в самопроверке ("Build version").
-[assembly: AssemblyVersion("1.85.0.0")]
-[assembly: AssemblyFileVersion("1.85.0.0")]
+[assembly: AssemblyVersion("1.86.0.0")]
+[assembly: AssemblyFileVersion("1.86.0.0")]
 
 namespace UsbBlockTray
 {
@@ -264,18 +264,23 @@ namespace UsbBlockTray
             }
 
             // Если значок трея уже запущен в этой сессии - второй экземпляр
-            // не стартуем (просто выходим). Проверяем по имени процесса и
-            // командной строке: то же имя exe носят служба (--service),
-            // уведомитель (--notify) и задача контроля (--ensure-service) -
-            // их за работающий трей не считаем.
-            if (Diag.TrayInstanceRunning()) return 0;
+            // не стартуем. Проверяем по имени процесса и командной строке:
+            // то же имя exe носят служба (--service), уведомитель (--notify)
+            // и задача контроля (--ensure-service) - их за работающий трей
+            // не считаем. Ручной запуск подтверждается окном, автозапуск из
+            // задачи Планировщика (--logon) молчит.
+            if (Diag.TrayInstanceRunning())
+            {
+                ReportAlreadyRunning(logon);
+                return 0;
+            }
 
             // Мьютекс трея. Если он занят ДРУГИМ экземпляром - второй значок
-            // не создаём и молча выходим. Учтён и случай, когда экземпляр
-            // запущен с другими правами (например, повышенными): обычный
-            // процесс не может открыть такой мьютекс и получает
-            // UnauthorizedAccessException - это тоже означает "уже запущено",
-            // поэтому не падаем, а тихо завершаемся.
+            // не создаём. Учтён и случай, когда экземпляр запущен с другими
+            // правами (например, повышенными): обычный процесс не может
+            // открыть такой мьютекс и получает UnauthorizedAccessException -
+            // это тоже "уже запущено", поэтому не падаем, а корректно
+            // завершаемся (окно - только при ручном запуске).
             Mutex mtx = null;
             try
             {
@@ -284,11 +289,13 @@ namespace UsbBlockTray
                 if (!created)
                 {
                     mtx.Dispose();
+                    ReportAlreadyRunning(logon);
                     return 0;
                 }
             }
             catch (UnauthorizedAccessException)
             {
+                ReportAlreadyRunning(logon);
                 return 0;
             }
 
@@ -318,6 +325,21 @@ namespace UsbBlockTray
                 }
             }
             return 0;
+        }
+
+        // Подсказка о повторном запуске. Ручной запуск (без --logon) видит
+        // окно "Програму вже запущено", а автозапуск из задачи Планировщика
+        // (-logon) молчит - иначе при каждом входе в систему могло бы
+        // всплывать окно, если значок уже работает.
+        private static void ReportAlreadyRunning(bool fromLogon)
+        {
+            if (fromLogon) return;
+            try
+            {
+                MessageBox.Show("Програму вже запущено (значок у треї).",
+                    Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch { }
         }
 
         // Запускает отдельный процесс-уведомитель (--notify) в текущей
