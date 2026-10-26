@@ -301,6 +301,7 @@ WHITELIST порожній - видаляти нічого.	WHITELIST is empty -
 Підключіть накопичувач і повторіть.	Connect a drive and try again.
 Після видалення пункти 2, 3, 4, 6, 8, 9 будуть	After removal, items 2, 3, 4, 6, 8, 9 will be
 Розмір кільця кожного журналу: 	Ring size of each journal: 
+СЛУЖБА	SERVICE
 СТАТУС: 	STATUS: 
 Скасувати	Cancel
 Служба моніторингу: 	Monitoring service: 

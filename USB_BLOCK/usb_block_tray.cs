@@ -21,8 +21,8 @@ using Microsoft.Win32;
 // Версия программы. Та же цифра стоит и в app.manifest (assemblyIdentity):
 // при каждой сборке обновляются ОБЕ, иначе в свойствах файла и в манифесте
 // разойдутся. Проверка - в самопроверке ("Build version").
-[assembly: AssemblyVersion("1.86.0.0")]
-[assembly: AssemblyFileVersion("1.86.0.0")]
+[assembly: AssemblyVersion("1.87.0.0")]
+[assembly: AssemblyFileVersion("1.87.0.0")]
 
 namespace UsbBlockTray
 {
@@ -5146,6 +5146,7 @@ foreach (string path in oldFiles.Keys)
             _value = current;
 
             this.Text = "Комбінація клавіш для журналу";
+            Ui.ApplyIcon(this);
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
             this.MinimizeBox = false;
@@ -5480,6 +5481,7 @@ foreach (string path in oldFiles.Keys)
             _devices = devices;
 
             this.Text = "Додати пристрій";
+            Ui.ApplyIcon(this);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
@@ -5709,6 +5711,7 @@ foreach (string path in oldFiles.Keys)
             _entries = entries;
 
             this.Text = "Видалити пристрій із WHITELIST";
+            Ui.ApplyIcon(this);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
@@ -5806,72 +5809,213 @@ foreach (string path in oldFiles.Keys)
         {
             _confirm = confirm;
 
-            int topPass = confirm ? 78 : 70;
-            int topRepeat = topPass + 50;
-            int topButtons = (confirm ? topRepeat : topPass) + 36;
-
             this.Text = caption;
+            Ui.ApplyIcon(this);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
             this.MinimizeBox = false;
             this.ShowInTaskbar = false;
-            this.ClientSize = new Size(470, topButtons + 60);
             this.Font = SystemFonts.MessageBoxFont;
             this.AutoScaleDimensions = new SizeF(7F, 15F);   // метрики Segoe UI 9 пт (проектные)
             this.AutoScaleMode = AutoScaleMode.Font;
 
+            const int formW = 380;
+            const int margin = 14;
+            const int innerW = formW - margin * 2;
+            const int fieldH = 26;
+
             Label lbl = new Label();
-            lbl.Text = prompt;
             lbl.AutoSize = false;
-            lbl.Size = new Size(446, 56);
-            lbl.Location = new Point(12, 10);
+            lbl.Text = prompt;
+            Font promptFont = this.Font;
+            try { promptFont = new Font(this.Font.FontFamily, 11f); }
+            catch { }
+            int promptH = MeasureWrapped(prompt, promptFont, innerW);   // прежняя высота места подсказки
+            if (!confirm)
+            {
+                Font fit = FitSingleLineFont(prompt, promptFont, innerW);
+                if (!ReferenceEquals(fit, promptFont))
+                {
+                    if (!ReferenceEquals(promptFont, this.Font)) promptFont.Dispose();
+                    promptFont = fit;
+                }
+            }
+            lbl.Font = promptFont;
+            lbl.Width = innerW;
+            lbl.Height = promptH;
+            lbl.Location = new Point(margin, 12);
+
+            int topPass = lbl.Bottom + 28;
+            int topRepeat = topPass + 46;
+            int topButtons = (confirm ? topRepeat : topPass) + 36;
+
+            this.ClientSize = new Size(formW, topButtons + 44);
+
+            int fieldX = margin + fieldH + 8;
+            int fieldW = (formW - margin) - fieldX;   // вправо до кромки «Скасувати»
 
             Label lblPass = new Label();
             lblPass.Text = string.IsNullOrEmpty(fieldLabel)
                 ? (confirm ? "Новий пароль:" : "Пароль:")
                 : fieldLabel;
             lblPass.AutoSize = true;
-            lblPass.Location = new Point(12, topPass - 20);
+            lblPass.Location = new Point(fieldX, topPass - 20);
 
             _tbPass = new System.Windows.Forms.TextBox();
             _tbPass.UseSystemPasswordChar = true;
-            _tbPass.SetBounds(12, topPass, 446, 24);
+            Button eyePass;
+            Panel boxPass = MakeField(fieldX, topPass, fieldW, fieldH,
+                _tbPass, this.Font, out eyePass);
 
             Label lblRepeat = new Label();
             lblRepeat.Text = "Повторіть пароль:";
             lblRepeat.AutoSize = true;
             lblRepeat.Visible = confirm;
-            lblRepeat.Location = new Point(12, topRepeat - 20);
+            lblRepeat.Location = new Point(fieldX, topRepeat - 20);
 
             _tbRepeat = new System.Windows.Forms.TextBox();
             _tbRepeat.UseSystemPasswordChar = true;
-            _tbRepeat.Visible = confirm;
-            _tbRepeat.SetBounds(12, topRepeat, 446, 24);
+            Button eyeRepeat;
+            Panel boxRepeat = MakeField(fieldX, topRepeat, fieldW, fieldH,
+                _tbRepeat, this.Font, out eyeRepeat);
+            boxRepeat.Visible = confirm;
 
             Button ok = new Button();
             ok.Text = "ОК";
             ok.Size = new Size(110, 28);
-            ok.Location = new Point(240, topButtons);
+            ok.Location = new Point(formW - margin - 110 - 8 - 110, topButtons);
             ok.Click += delegate { Commit(); };
 
             Button cancel = new Button();
             cancel.Text = "Скасувати";
             cancel.Size = new Size(110, 28);
-            cancel.Location = new Point(358, topButtons);
+            cancel.Location = new Point(formW - margin - 110, topButtons);
             cancel.DialogResult = DialogResult.Cancel;
+
+            PictureBox lockPass = MakeLock(margin, topPass, fieldH);
+            PictureBox lockRepeat = MakeLock(margin, topRepeat, fieldH, confirm);
 
             this.Controls.Add(lbl);
             this.Controls.Add(lblPass);
-            this.Controls.Add(_tbPass);
+            this.Controls.Add(lockPass);
+            this.Controls.Add(boxPass);
             this.Controls.Add(lblRepeat);
-            this.Controls.Add(_tbRepeat);
+            this.Controls.Add(lockRepeat);
+            this.Controls.Add(boxRepeat);
             this.Controls.Add(ok);
             this.Controls.Add(cancel);
             this.CancelButton = cancel;
             this.AcceptButton = ok;
 
+            this.Load += delegate
+            {
+                lockPass.Image = Ui.LockImage(lockPass.Height);
+                lockRepeat.Image = Ui.LockImage(lockRepeat.Height);
+            };
             this.Shown += delegate { _tbPass.Focus(); };
+        }
+
+        // Наибольший шрифт (не крупнее 11 пт), при котором подсказка
+        // помещается в одну строку заданной ширины.
+        private static Font FitSingleLineFont(string text, Font baseFont, int width)
+        {
+            try
+            {
+                float pt = Math.Min(11f, baseFont.SizeInPoints);
+                for (; pt >= 7.5f; pt -= 0.25f)
+                {
+                    Font f = new Font(baseFont.FontFamily, pt);
+                    bool oneLine = MeasureWrapped(text, f, width) <=
+                        MeasureWrapped("Ag", f, width);
+                    if (oneLine) return f;
+                    f.Dispose();
+                }
+                return new Font(baseFont.FontFamily, 7.5f);
+            }
+            catch { return baseFont; }
+        }
+
+        // Высота текста с переносами по ширине (для подсказки крупным шрифтом).
+        private static int MeasureWrapped(string text, Font font, int width)
+        {
+            try
+            {
+                using (Label probe = new Label())
+                {
+                    probe.AutoSize = true;
+                    probe.MaximumSize = new Size(width, 0);
+                    probe.Text = text ?? string.Empty;
+                    if (font != null) probe.Font = font;
+                    return probe.GetPreferredSize(new Size(width, 0)).Height;
+                }
+            }
+            catch { return 56; }
+        }
+
+        // Поле ввода: белая панель без рамки, текст по центру по вертикали
+        // (крупнее прежнего) и кнопка-«глаз» у правого края для показа пароля.
+        private static Panel MakeField(int x, int y, int w, int h,
+            TextBox tb, Font baseFont, out Button eye)
+        {
+            const int eyeW = 22;
+            Panel box = new Panel();
+            box.BackColor = SystemColors.Window;
+            box.Bounds = new Rectangle(x, y, w, h);
+
+            tb.BorderStyle = BorderStyle.None;
+            tb.BackColor = SystemColors.Window;
+            tb.AutoSize = false;
+            try { tb.Font = new Font(baseFont.FontFamily, 12f); }
+            catch { }
+            tb.Height = Math.Min(h - 4, tb.PreferredHeight);
+            tb.Width = w - eyeW - 8;
+            tb.Location = new Point(3, (h - tb.Height) / 2);
+
+            Button btn = new Button();
+            eye = btn;
+            btn.FlatStyle = FlatStyle.Flat;
+            btn.FlatAppearance.BorderSize = 0;
+            btn.FlatAppearance.MouseOverBackColor = SystemColors.Window;
+            btn.FlatAppearance.MouseDownBackColor = SystemColors.Window;
+            btn.UseVisualStyleBackColor = false;
+            btn.BackColor = SystemColors.Window;
+            btn.Size = new Size(eyeW, eyeW);
+            btn.Location = new Point(w - eyeW - 2, (h - eyeW) / 2);
+            btn.Cursor = Cursors.Hand;
+            btn.TabStop = false;
+            btn.Image = Ui.EyeImage(18, false);
+            btn.ImageAlign = ContentAlignment.MiddleCenter;
+            btn.Click += delegate
+            {
+                tb.UseSystemPasswordChar = !tb.UseSystemPasswordChar;
+                btn.Image = Ui.EyeImage(18, !tb.UseSystemPasswordChar);
+                int pos = tb.SelectionStart;
+                tb.Focus();
+                try { tb.SelectionStart = pos; tb.SelectionLength = 0; } catch { }
+            };
+
+            box.Controls.Add(tb);
+            box.Controls.Add(eye);
+            return box;
+        }
+
+        // Значок замка слева от поля, высотой с само поле.
+        private static PictureBox MakeLock(int x, int y, int size)
+        {
+            return MakeLock(x, y, size, true);
+        }
+
+        private static PictureBox MakeLock(int x, int y, int size, bool visible)
+        {
+            PictureBox pb = new PictureBox();
+            pb.Size = new Size(size, size);
+            pb.Location = new Point(x, y);
+            pb.SizeMode = PictureBoxSizeMode.CenterImage;
+            pb.BackColor = Color.Transparent;
+            pb.Image = Ui.LockImage(size);
+            pb.Visible = visible;
+            return pb;
         }
 
         private void Commit()
@@ -5918,6 +6062,7 @@ foreach (string path in oldFiles.Keys)
             Dictionary<string, string> volumeLabels)
         {
             this.Text = "WHITELIST - дозволені USB-накопичувачі";
+            Ui.ApplyIcon(this);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
@@ -6063,6 +6208,7 @@ foreach (string path in oldFiles.Keys)
         public JournalViewForm()
         {
             this.Text = "Журнал USB-блокування";
+            Ui.ApplyIcon(this);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.Sizable;
             this.MinimizeBox = false;
@@ -6073,6 +6219,8 @@ foreach (string path in oldFiles.Keys)
 
             _tabs = new TabControl();
             _tabs.SetBounds(12, 8, 976, 560);
+            _tabs.Anchor = AnchorStyles.Top | AnchorStyles.Bottom
+                | AnchorStyles.Left | AnchorStyles.Right;
             this.Controls.Add(_tabs);
 
             _devices = MakeBox();
@@ -6084,17 +6232,20 @@ foreach (string path in oldFiles.Keys)
 
             _status = new Label();
             _status.SetBounds(12, 574, 434, 22);
+            _status.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
             this.Controls.Add(_status);
 
             _open = new Button();
             _open.Text = "Відкрити файл...";
             _open.SetBounds(452, 572, 124, 27);
+            _open.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
             _open.Click += delegate { OpenExternal(); };
             this.Controls.Add(_open);
 
             _live = new Button();
             _live.Text = "До журналу";
             _live.SetBounds(584, 572, 116, 27);
+            _live.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
             _live.Enabled = false;
             _live.Click += delegate { _external = null; Fill(); };
             this.Controls.Add(_live);
@@ -6102,12 +6253,14 @@ foreach (string path in oldFiles.Keys)
             Button refresh = new Button();
             refresh.Text = "Оновити";
             refresh.SetBounds(708, 572, 108, 27);
+            refresh.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
             refresh.Click += delegate { Fill(); };
             this.Controls.Add(refresh);
 
             Button copy = new Button();
             copy.Text = "Копіювати";
             copy.SetBounds(824, 572, 116, 27);
+            copy.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
             copy.Click += delegate { CopyCurrent(); };
             this.Controls.Add(copy);
 
@@ -6818,11 +6971,26 @@ foreach (string path in oldFiles.Keys)
             }
         }
 
+        // Подсказка-клавиша пункта меню: цифра/буква убирается из текста
+        // и показывается справа серым, как в системных меню. Сам ярлык при
+        // этом НЕ назначается (ShortcutKeys), иначе цифры перехватывались бы
+        // глобально - это только оформление.
+        private static void SetHint(ToolStripMenuItem item, string hint)
+        {
+            if (item == null || string.IsNullOrEmpty(hint)) return;
+            item.ShortcutKeyDisplayString = hint;
+            string t = item.Text;
+            if (t != null && t.StartsWith(hint + " ", StringComparison.Ordinal))
+                item.Text = t.Substring(hint.Length + 1);
+        }
+
         private void BuildMenu()
         {
             _menu = new ContextMenuStrip();
 
             _miStatus = new ToolStripMenuItem(StatusText());
+            try { _miStatus.Font = new Font(SystemFonts.MenuFont, FontStyle.Bold); }
+            catch { }
             _menu.Items.Add(_miStatus);
             ApplyStatusColor();
             _menu.Items.Add(new ToolStripSeparator());
@@ -6848,6 +7016,7 @@ foreach (string path in oldFiles.Keys)
                 _menu.Items.Add(new ToolStripSeparator());
 
                 ToolStripMenuItem mExitLimited = new ToolStripMenuItem("Вихід");
+                mExitLimited.Image = MenuIcons.Get("exit");
                 mExitLimited.Click += delegate { this.ExitThread(); };
                 _menu.Items.Add(mExitLimited);
 
@@ -6855,31 +7024,47 @@ foreach (string path in oldFiles.Keys)
                 return;
             }
 
+            _menu.Items.Add(Ui.MenuHeader("WHITELIST"));
+
             ToolStripMenuItem mBlock = new ToolStripMenuItem("1 Блокувати пристрої");
+            SetHint(mBlock, "1");
+            mBlock.Image = MenuIcons.Get("block");
             mBlock.Click += delegate { DoBlock(); };
             _menu.Items.Add(mBlock);
 
             ToolStripMenuItem mUnblock = new ToolStripMenuItem("2 Розблокувати пристрої");
+            SetHint(mUnblock, "2");
+            mUnblock.Image = MenuIcons.Get("unblock");
             mUnblock.Click += delegate { DoUnblock(); };
             _menu.Items.Add(mUnblock);
 
             ToolStripMenuItem mAdd = new ToolStripMenuItem("3 Додати пристрій");
+            SetHint(mAdd, "3");
+            mAdd.Image = MenuIcons.Get("add");
             mAdd.Click += delegate { DoAddDevice(); };
             _menu.Items.Add(mAdd);
 
             ToolStripMenuItem mRemove = new ToolStripMenuItem("4 Видалити пристрій із WHITELIST...");
+            SetHint(mRemove, "4");
+            mRemove.Image = MenuIcons.Get("remove");
             mRemove.Click += delegate { DoRemoveDevice(); };
             _menu.Items.Add(mRemove);
 
             ToolStripMenuItem mExport = new ToolStripMenuItem("5 Експортувати WHITELIST...");
+            SetHint(mExport, "5");
+            mExport.Image = MenuIcons.Get("export");
             mExport.Click += delegate { DoExport(); };
             _menu.Items.Add(mExport);
 
             ToolStripMenuItem mImport = new ToolStripMenuItem("6 Імпортувати WHITELIST...");
+            SetHint(mImport, "6");
+            mImport.Image = MenuIcons.Get("import");
             mImport.Click += delegate { DoImport(); };
             _menu.Items.Add(mImport);
 
             ToolStripMenuItem mView = new ToolStripMenuItem("0 Переглянути WHITELIST...");
+            SetHint(mView, "0");
+            mView.Image = MenuIcons.Get("view");
             mView.Click += delegate { DoViewWhitelist(); };
             _menu.Items.Add(mView);
 
@@ -6889,34 +7074,45 @@ foreach (string path in oldFiles.Keys)
             // При включении здесь же задаётся дополнительное сочетание -
             // второе на ту же функцию, что и Ctrl+Alt+O.
             _miJournal = new ToolStripMenuItem("J Вести журнал копіювання");
+            _miJournal.Image = MenuIcons.Get("journal");
+            SetHint(_miJournal, "J");
             _miJournal.Click += delegate { DoToggleJournal(); };
             _menu.Items.Add(_miJournal);
 
             _menu.Items.Add(new ToolStripSeparator());
+            _menu.Items.Add(Ui.MenuHeader("СЛУЖБА"));
 
             _miSvcInstall = new ToolStripMenuItem("7 Встановити службу");
+            SetHint(_miSvcInstall, "7");
+            _miSvcInstall.Image = MenuIcons.Get("install");
             _miSvcInstall.Click += delegate { DoInstallService(); };
             _menu.Items.Add(_miSvcInstall);
 
             _miSvcRemove = new ToolStripMenuItem("8 Видалити службу");
+            SetHint(_miSvcRemove, "8");
+            _miSvcRemove.Image = MenuIcons.Get("svcrm");
             _miSvcRemove.Click += delegate { DoRemoveService(); };
             _menu.Items.Add(_miSvcRemove);
 
             _menu.Items.Add(new ToolStripSeparator());
 
             ToolStripMenuItem mUninstall = new ToolStripMenuItem("9 Видалити застосунок...");
+            SetHint(mUninstall, "9");
+            mUninstall.Image = MenuIcons.Get("uninstall");
             mUninstall.Click += delegate { DoUninstall(); };
             _menu.Items.Add(mUninstall);
 
             _menu.Items.Add(new ToolStripSeparator());
 
             ToolStripMenuItem mDelPass = new ToolStripMenuItem("Видалити пароль");
+            mDelPass.Image = MenuIcons.Get("password");
             mDelPass.Click += delegate { DoRemovePassword(); };
             _menu.Items.Add(mDelPass);
 
             _menu.Items.Add(new ToolStripSeparator());
 
             ToolStripMenuItem mExit = new ToolStripMenuItem("Вихід");
+            mExit.Image = MenuIcons.Get("exit");
             mExit.Click += delegate { this.ExitThread(); };
             _menu.Items.Add(mExit);
 
@@ -6946,6 +7142,7 @@ foreach (string path in oldFiles.Keys)
             _miJournal.Text = "J Вести журнал копіювання " +
                 (on ? "(увімкнено" + (string.IsNullOrEmpty(extra) ? "" : ", " + extra) + ")"
                      : "(вимкнено)");
+            SetHint(_miJournal, "J");
         }
 
         private void RefreshStatus()
@@ -8634,6 +8831,389 @@ foreach (string path in oldFiles.Keys)
 
     // Всплывающее окно-сообщение (рамка с закруглёнными углами, справа
     // внизу, закрывается само)
+    // Общее оформление окон и меню. Держим в одном месте, чтобы диалоги
+    // и контекстное меню выглядели одинаково.
+    internal static class Ui
+    {
+        private static Icon _appIcon;
+
+        // Значок приложения из встроенного ресурса (тот же, что у трея).
+        public static Icon AppIcon
+        {
+            get
+            {
+                if (_appIcon != null) return _appIcon;
+                try
+                {
+                    using (Stream s = Assembly.GetExecutingAssembly()
+                        .GetManifestResourceStream("usb_block.tray.ico"))
+                    {
+                        if (s != null) _appIcon = new Icon(s);
+                    }
+                }
+                catch { }
+                if (_appIcon == null)
+                {
+                    try { _appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); }
+                    catch { }
+                }
+                return _appIcon;
+            }
+        }
+
+        public static void ApplyIcon(Form f)
+        {
+            try
+            {
+                if (f == null) return;
+                Icon i = AppIcon;
+                if (i != null) { f.Icon = i; f.ShowIcon = true; }
+            }
+            catch { }
+        }
+
+        // Значок навесного замка заданной высоты (для поля пароля).
+        // Рисуется кодом, поэтому чёткий при любом размере.
+        public static Image LockImage(int size)
+        {
+            try
+            {
+                if (size < 8) size = 8;
+                Bitmap bmp = new Bitmap(size, size,
+                    System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                using (Graphics g = Graphics.FromImage(bmp))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    g.Clear(Color.Transparent);
+                    float s = size;
+                    Color c = Color.FromArgb(96, 106, 118);
+                    float pw = Math.Max(1.4f, s * 0.075f);
+                    using (Pen p = new Pen(c, pw))
+                    {
+                        p.StartCap = LineCap.Round;
+                        p.EndCap = LineCap.Round;
+                        p.LineJoin = LineJoin.Round;
+                        g.DrawArc(p, s * 0.30f, s * 0.18f,
+                            s * 0.40f, s * 0.56f, 180, 180);
+                        using (GraphicsPath body = RoundRect(
+                            s * 0.22f, s * 0.46f, s * 0.56f, s * 0.40f, s * 0.10f))
+                            g.DrawPath(p, body);
+                    }
+                    using (SolidBrush b = new SolidBrush(c))
+                    {
+                        g.FillEllipse(b, s * 0.445f, s * 0.555f,
+                            s * 0.11f, s * 0.11f);
+                        g.FillRectangle(b, s * 0.49f, s * 0.64f,
+                            s * 0.02f, s * 0.13f);
+                    }
+                }
+                return bmp;
+            }
+            catch { return null; }
+        }
+
+        // Значок «глаз» для кнопки показа пароля. crossed=true - глаз
+        // перечёркнут (пароль сейчас виден, нажатие его скроет).
+        public static Image EyeImage(int size, bool crossed)
+        {
+            try
+            {
+                if (size < 8) size = 8;
+                Bitmap bmp = new Bitmap(size, size,
+                    System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                using (Graphics g = Graphics.FromImage(bmp))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    g.Clear(Color.Transparent);
+                    float s = size;
+                    Color c = Color.FromArgb(96, 106, 118);
+                    float pw = Math.Max(1.3f, s * 0.065f);
+                    using (Pen p = new Pen(c, pw))
+                    {
+                        p.StartCap = LineCap.Round;
+                        p.EndCap = LineCap.Round;
+                        float w = s * 0.76f, h = s * 0.46f;
+                        float ex = (s - w) / 2f, ey = (s - h) / 2f;
+                        using (GraphicsPath eye = new GraphicsPath())
+                        {
+                            eye.AddBezier(ex, ey + h / 2f,
+                                ex + w * 0.25f, ey,
+                                ex + w * 0.75f, ey,
+                                ex + w, ey + h / 2f);
+                            eye.AddBezier(ex + w, ey + h / 2f,
+                                ex + w * 0.75f, ey + h,
+                                ex + w * 0.25f, ey + h,
+                                ex, ey + h / 2f);
+                            eye.CloseFigure();
+                            g.DrawPath(p, eye);
+                        }
+                        if (crossed)
+                            g.DrawLine(p, s * 0.22f, s * 0.80f,
+                                s * 0.80f, s * 0.22f);
+                    }
+                    using (SolidBrush b = new SolidBrush(c))
+                        g.FillEllipse(b, s * 0.42f, s * 0.42f,
+                            s * 0.16f, s * 0.16f);
+                }
+                return bmp;
+            }
+            catch { return null; }
+        }
+
+        private static GraphicsPath RoundRect(float x, float y,
+            float w, float h, float r)
+        {
+            GraphicsPath p = new GraphicsPath();
+            float d = r * 2;
+            p.AddArc(x, y, d, d, 180, 90);
+            p.AddArc(x + w - d, y, d, d, 270, 90);
+            p.AddArc(x + w - d, y + h - d, d, d, 0, 90);
+            p.AddArc(x, y + h - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+
+        // Заголовок раздела меню: неактивный и приглушённый, чтобы
+        // визуально отделять группы пунктов без лишних разделителей.
+        public static ToolStripItem MenuHeader(string text)
+        {
+            ToolStripLabel h = new ToolStripLabel(text);
+            try
+            {
+                h.Font = new Font(SystemFonts.MenuFont, FontStyle.Bold);
+                h.ForeColor = SystemColors.GrayText;
+                h.Padding = new Padding(4, 3, 4, 1);
+                h.Enabled = false;
+            }
+            catch { }
+            return h;
+        }
+    }
+
+    // Небольшие значки пунктов меню рисуются кодом, чтобы не тащить в
+    // сборку лишние файлы. Кэшируются на время работы процесса.
+    internal static class MenuIcons
+    {
+        private static readonly Dictionary<string, Image> _cache =
+            new Dictionary<string, Image>(StringComparer.Ordinal);
+
+        private static readonly Color Green = Color.FromArgb(46, 160, 67);
+        private static readonly Color Red = Color.FromArgb(214, 69, 69);
+        private static readonly Color Blue = Color.FromArgb(47, 114, 214);
+        private static readonly Color Amber = Color.FromArgb(224, 158, 38);
+        private static readonly Color Slate = Color.FromArgb(92, 102, 114);
+
+        public static Image Get(string kind)
+        {
+            Image img;
+            if (_cache.TryGetValue(kind, out img)) return img;
+            try { img = Draw(kind); }
+            catch { img = null; }
+            _cache[kind] = img;
+            return img;
+        }
+
+        private static Image Draw(string kind)
+        {
+            Bitmap bmp = new Bitmap(16, 16,
+                System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.Clear(Color.Transparent);
+                switch (kind)
+                {
+                    case "block":     Badge(g, Red);   Lock(g, Red);       break;
+                    case "unblock":   Badge(g, Green); Check(g);           break;
+                    case "add":       Badge(g, Green); Plus(g, true);      break;
+                    case "remove":    Badge(g, Red);   Plus(g, false);     break;
+                    case "export":    Badge(g, Blue);  Arrow(g, true);     break;
+                    case "import":    Badge(g, Blue);  Arrow(g, false);    break;
+                    case "view":      Badge(g, Blue);  Lines(g);           break;
+                    case "journal":   Badge(g, Amber); Document(g, Amber); break;
+                    case "install":   Badge(g, Green); Gear(g);            break;
+                    case "svcrm":     Badge(g, Red);   Cross(g);           break;
+                    case "uninstall": Badge(g, Red);   Trash(g, Red);      break;
+                    case "password":  Badge(g, Amber); Key(g);             break;
+                    case "language":  Badge(g, Blue);  Globe(g);           break;
+                    case "exit":      Badge(g, Slate); Power(g);           break;
+                }
+            }
+            return bmp;
+        }
+
+        private static void Badge(Graphics g, Color c)
+        {
+            using (SolidBrush b = new SolidBrush(c))
+                g.FillEllipse(b, 1f, 1f, 14f, 14f);
+            using (Pen p = new Pen(Color.FromArgb(45, 0, 0, 0), 1f))
+                g.DrawEllipse(p, 1.25f, 1.25f, 13.5f, 13.5f);
+        }
+
+        private static Pen White(float w)
+        {
+            Pen p = new Pen(Color.White, w);
+            p.StartCap = LineCap.Round;
+            p.EndCap = LineCap.Round;
+            p.LineJoin = LineJoin.Round;
+            return p;
+        }
+
+        private static void Plus(Graphics g, bool plus)
+        {
+            using (Pen p = White(1.9f))
+            {
+                g.DrawLine(p, 5.4f, 8f, 10.6f, 8f);
+                if (plus) g.DrawLine(p, 8f, 5.4f, 8f, 10.6f);
+            }
+        }
+
+        private static void Check(Graphics g)
+        {
+            using (Pen p = White(1.9f))
+                g.DrawLines(p, new PointF[] {
+                    new PointF(5.2f, 8.2f),
+                    new PointF(7.2f, 10.1f),
+                    new PointF(10.8f, 5.9f) });
+        }
+
+        private static void Cross(Graphics g)
+        {
+            using (Pen p = White(1.9f))
+            {
+                g.DrawLine(p, 5.8f, 5.8f, 10.2f, 10.2f);
+                g.DrawLine(p, 10.2f, 5.8f, 5.8f, 10.2f);
+            }
+        }
+
+        private static void Arrow(Graphics g, bool up)
+        {
+            using (Pen p = White(1.9f))
+            {
+                if (up)
+                {
+                    g.DrawLine(p, 8f, 11f, 8f, 5.2f);
+                    g.DrawLines(p, new PointF[] {
+                        new PointF(5.7f, 7.4f),
+                        new PointF(8f, 5.1f),
+                        new PointF(10.3f, 7.4f) });
+                }
+                else
+                {
+                    g.DrawLine(p, 8f, 5f, 8f, 10.8f);
+                    g.DrawLines(p, new PointF[] {
+                        new PointF(5.7f, 8.6f),
+                        new PointF(8f, 10.9f),
+                        new PointF(10.3f, 8.6f) });
+                }
+            }
+        }
+
+        private static void Lines(Graphics g)
+        {
+            using (Pen p = White(1.6f))
+            {
+                g.DrawLine(p, 5.2f, 5.8f, 10.8f, 5.8f);
+                g.DrawLine(p, 5.2f, 8f, 10.8f, 8f);
+                g.DrawLine(p, 5.2f, 10.2f, 9f, 10.2f);
+            }
+        }
+
+        private static void Lock(Graphics g, Color badge)
+        {
+            using (Pen p = White(1.5f))
+                g.DrawArc(p, 5.3f, 4.4f, 5.4f, 5.4f, 180, 180);
+            using (SolidBrush b = new SolidBrush(Color.White))
+                g.FillRectangle(b, 5.3f, 7.6f, 5.4f, 4.3f);
+            using (SolidBrush b = new SolidBrush(badge))
+            {
+                g.FillEllipse(b, 7.2f, 8.7f, 1.6f, 1.6f);
+                g.FillRectangle(b, 7.7f, 9.6f, 0.6f, 1.2f);
+            }
+        }
+
+        private static void Document(Graphics g, Color badge)
+        {
+            using (SolidBrush b = new SolidBrush(Color.White))
+                g.FillRectangle(b, 5.2f, 4.4f, 5.6f, 7.2f);
+            using (Pen p = new Pen(badge, 1.1f))
+            {
+                g.DrawLine(p, 6.4f, 6.4f, 9.6f, 6.4f);
+                g.DrawLine(p, 6.4f, 8f, 9.6f, 8f);
+                g.DrawLine(p, 6.4f, 9.6f, 8.8f, 9.6f);
+            }
+        }
+
+        private static void Gear(Graphics g)
+        {
+            using (Pen p = White(1.5f))
+            {
+                g.DrawEllipse(p, 6.2f, 6.2f, 3.6f, 3.6f);
+                for (int i = 0; i < 8; i++)
+                {
+                    double a = Math.PI * i / 4.0;
+                    float x1 = (float)(8 + Math.Cos(a) * 2.9);
+                    float y1 = (float)(8 + Math.Sin(a) * 2.9);
+                    float x2 = (float)(8 + Math.Cos(a) * 4.3);
+                    float y2 = (float)(8 + Math.Sin(a) * 4.3);
+                    g.DrawLine(p, x1, y1, x2, y2);
+                }
+            }
+        }
+
+        private static void Trash(Graphics g, Color badge)
+        {
+            using (Pen p = White(1.5f))
+            {
+                g.DrawLine(p, 5.4f, 5.6f, 10.6f, 5.6f);
+                g.DrawLine(p, 6.8f, 4.4f, 9.2f, 4.4f);
+                g.DrawLines(p, new PointF[] {
+                    new PointF(6f, 5.6f),
+                    new PointF(6.6f, 11.2f),
+                    new PointF(9.4f, 11.2f),
+                    new PointF(10f, 5.6f) });
+            }
+            using (Pen p = new Pen(badge, 1.1f))
+            {
+                g.DrawLine(p, 7.5f, 7f, 7.5f, 9.9f);
+                g.DrawLine(p, 8.5f, 7f, 8.5f, 9.9f);
+            }
+        }
+
+        private static void Key(Graphics g)
+        {
+            using (Pen p = White(1.5f))
+            {
+                g.DrawEllipse(p, 5.1f, 4.9f, 3.3f, 3.3f);
+                g.DrawLine(p, 8f, 8f, 11.2f, 11.2f);
+                g.DrawLine(p, 9.7f, 9.7f, 10.6f, 8.8f);
+                g.DrawLine(p, 10.4f, 10.4f, 11.3f, 9.5f);
+            }
+        }
+
+        private static void Globe(Graphics g)
+        {
+            using (Pen p = White(1.4f))
+            {
+                g.DrawEllipse(p, 4.2f, 4.2f, 7.6f, 7.6f);
+                g.DrawLine(p, 4.2f, 8f, 11.8f, 8f);
+                g.DrawEllipse(p, 6.6f, 4.2f, 2.8f, 7.6f);
+            }
+        }
+
+        private static void Power(Graphics g)
+        {
+            using (Pen p = White(1.7f))
+            {
+                g.DrawArc(p, 4.7f, 4.7f, 6.6f, 6.6f, 135, 270);
+                g.DrawLine(p, 8f, 4.2f, 8f, 7.8f);
+            }
+        }
+    }
+
     public sealed class NotifyPopup : Form
     {
         // Радиус скругления углов окна и толщина рамки: рамка рисуется

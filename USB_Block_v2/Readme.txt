@@ -471,13 +471,13 @@ S-1-5-11 — чтение). Автозапуск и служба использ�
 В Git Bash аргументы /r: подменяются на пути — использовать -r: (с дефисом).
 
 При КАЖДОЙ сборке обновляется версия — в трёх местах сразу:
-  - app.manifest: <assemblyIdentity version="2.0.6.0" .../>
-  - usb_block_tray.cs: [assembly: AssemblyVersion("2.0.6.0")] и
-    [assembly: AssemblyFileVersion("2.0.6.0")]
+  - app.manifest: <assemblyIdentity version="2.0.7.0" .../>
+  - usb_block_tray.cs: [assembly: AssemblyVersion("2.0.7.0")] и
+    [assembly: AssemblyFileVersion("2.0.7.0")]
 Номер - это версия двуязычной линии USB_Block_v2 (major=2,
 украинский + English). Самопроверка сверяет все
 три значения между собой («Build version (assembly/file/манифест):
-OK (assembly=2.0.6.0 file=2.0.6.0 манифест=2.0.6.0)») и не даст
+OK (assembly=2.0.7.0 file=2.0.7.0 манифест=2.0.7.0)») и не даст
 забыть одно из мест: расхождение печатается как FAIL.
 
 Значок в трее берётся из файла stop_usb.ico, встроенного в exe ресурсом
