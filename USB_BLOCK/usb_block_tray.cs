@@ -21,8 +21,8 @@ using Microsoft.Win32;
 // Версия программы. Та же цифра стоит и в app.manifest (assemblyIdentity):
 // при каждой сборке обновляются ОБЕ, иначе в свойствах файла и в манифесте
 // разойдутся. Проверка - в самопроверке ("Build version").
-[assembly: AssemblyVersion("1.87.0.0")]
-[assembly: AssemblyFileVersion("1.87.0.0")]
+[assembly: AssemblyVersion("1.88.0.0")]
+[assembly: AssemblyFileVersion("1.88.0.0")]
 
 namespace UsbBlockTray
 {
@@ -5486,7 +5486,8 @@ foreach (string path in oldFiles.Keys)
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
             this.MinimizeBox = false;
-            this.ClientSize = new Size(540, 340);
+            this.ClientSize = new Size(540, 240);
+            this.ShowInTaskbar = false;
             this.Font = SystemFonts.MessageBoxFont;
             this.AutoScaleDimensions = new SizeF(7F, 15F);   // метрики Segoe UI 9 пт (проектные)
             this.AutoScaleMode = AutoScaleMode.Font;
@@ -5498,12 +5499,13 @@ foreach (string path in oldFiles.Keys)
             Label lblSel = new Label();
             lblSel.Text = "Виберіть USB-накопичувач:";
             lblSel.AutoSize = true;
-            lblSel.Location = new Point(12, 10);
+            lblSel.Location = new Point(14, 14);
 
             _cbDevice = new System.Windows.Forms.ComboBox();
             _cbDevice.DropDownStyle = ComboBoxStyle.DropDownList;
             _cbDevice.DrawMode = DrawMode.OwnerDrawFixed;
-            _cbDevice.SetBounds(12, 32, 516, 24);
+            _cbDevice.ItemHeight = 20;
+            _cbDevice.SetBounds(14, 34, 512, 26);
             foreach (StorageDevice sd in _devices)
             {
                 // Метка тома перед названием модели; DEV ID и SN в списке
@@ -5517,43 +5519,47 @@ foreach (string path in oldFiles.Keys)
             _cbDevice.SelectedIndexChanged += delegate { OnSelection(); };
 
             Label lblName = new Label();
-            lblName.Text = "1. Ім'я Пристрою";
+            lblName.Text = "Ім'я пристрою";
             lblName.AutoSize = true;
-            lblName.Location = new Point(12, 70);
+            lblName.Location = new Point(14, 72);
 
             _tbName = new System.Windows.Forms.TextBox();
             _tbName.Text = "Новий Пристрій";
-            _tbName.SetBounds(12, 92, 516, 24);
+            _tbName.SetBounds(14, 92, 512, 23);
 
             Label lblType = new Label();
-            lblType.Text = "2. Тип Пристрою (ID):";
+            lblType.Text = "USB-ідентифікатор";
             lblType.AutoSize = true;
-            lblType.Location = new Point(12, 128);
+            lblType.Location = new Point(14, 129);
 
             _tbType = new System.Windows.Forms.TextBox();
             _tbType.ReadOnly = true;
-            _tbType.SetBounds(12, 150, 516, 24);
+            _tbType.TabStop = false;
+            _tbType.BackColor = SystemColors.Control;
+            _tbType.SetBounds(14, 149, 250, 23);
 
             Label lblModel = new Label();
-            lblModel.Text = "3. Модель Пристрою (Vendor ID):";
+            lblModel.Text = "Модель пристрою";
             lblModel.AutoSize = true;
-            lblModel.Location = new Point(12, 188);
+            lblModel.Location = new Point(276, 129);
 
             _tbModel = new System.Windows.Forms.TextBox();
             _tbModel.ReadOnly = true;
-            _tbModel.SetBounds(12, 210, 516, 24);
+            _tbModel.TabStop = false;
+            _tbModel.BackColor = SystemColors.Control;
+            _tbModel.SetBounds(276, 149, 250, 23);
 
             _ok = new Button();
             _ok.Text = "Додати";
-            _ok.Size = new Size(110, 28);
-            _ok.Location = new Point(306, 270);
+            _ok.Size = new Size(100, 28);
+            _ok.Location = new Point(318, 198);
             _ok.Enabled = false;
             _ok.Click += delegate { Commit(); };
 
             Button cancel = new Button();
             cancel.Text = "Скасувати";
-            cancel.Size = new Size(110, 28);
-            cancel.Location = new Point(424, 270);
+            cancel.Size = new Size(100, 28);
+            cancel.Location = new Point(426, 198);
             cancel.DialogResult = DialogResult.Cancel;
 
             this.Controls.Add(lblSel);
@@ -5599,16 +5605,26 @@ foreach (string path in oldFiles.Keys)
 
         private void DrawDeviceItem(object sender, DrawItemEventArgs e)
         {
-            if (e.Index < 0 || e.Index >= _devices.Count) return;
             e.DrawBackground();
+            if (e.Index < 0 || e.Index >= _devices.Count) return;
+            Rectangle b = e.Bounds;
+            Color dot = _devices[e.Index].Allowed
+                ? Color.FromArgb(46, 160, 67) : Color.FromArgb(200, 60, 50);
+            int d = 8;
+            int cy = b.Top + (b.Height - d) / 2;
+            SmoothingMode old = e.Graphics.SmoothingMode;
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using (SolidBrush br = new SolidBrush(dot))
+                e.Graphics.FillEllipse(br, b.Left + 5, cy, d, d);
+            e.Graphics.SmoothingMode = old;
             string text = _cbDevice.Items[e.Index].ToString();
-            using (SolidBrush b = new SolidBrush(_devices[e.Index].Allowed
-                ? Color.DarkGreen : Color.DarkRed))
-            {
-                e.Graphics.DrawString(text, e.Font, b,
-                    new Rectangle(e.Bounds.Left + 2, e.Bounds.Top + 1,
-                        e.Bounds.Width - 4, e.Bounds.Height - 2));
-            }
+            bool selected = (e.State & DrawItemState.Selected) != 0 &&
+                            (e.State & DrawItemState.ComboBoxEdit) == 0;
+            TextRenderer.DrawText(e.Graphics, text, e.Font,
+                new Rectangle(b.Left + 18, b.Top, b.Width - 22, b.Height),
+                selected ? SystemColors.HighlightText : SystemColors.ControlText,
+                TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis |
+                TextFormatFlags.NoPrefix);
             e.DrawFocusRectangle();
         }
 
@@ -7454,7 +7470,7 @@ foreach (string path in oldFiles.Keys)
                 StringBuilder q = new StringBuilder();
                 foreach (DeviceEntry e in selected)
                     q.AppendLine("* " + DescribeEntry(e));
-                if (MessageBox.Show(
+                if (Ui.Ask(
                         "Видалити з WHITELIST і заблокувати?\n\n" + q.ToString(),
                         Program.Title, MessageBoxButtons.YesNo, MessageBoxIcon.Warning)
                     != DialogResult.Yes)
@@ -7635,10 +7651,10 @@ foreach (string path in oldFiles.Keys)
                 msg.AppendLine();
                 msg.AppendLine("Як застосувати імпортовані дані?");
                 msg.AppendLine();
-                msg.AppendLine("  «Так»       - перезаписати (замінити) поточний whitelist");
-                msg.AppendLine("  «Ні»        - додати до поточного whitelist (об'єднати)");
-                msg.AppendLine("  «Скасувати» - скасувати");
-                DialogResult action = MessageBox.Show(msg.ToString(), Program.Title,
+                msg.AppendLine("  «ТАК»       - перезаписати (замінити) поточний whitelist");
+                msg.AppendLine("  «НІ»        - додати до поточного whitelist (об'єднати)");
+                msg.AppendLine("  «ВІДМІНА» - скасувати");
+                DialogResult action = Ui.Ask(msg.ToString(), Program.Title,
                     MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
                 if (action == DialogResult.Cancel) return;
 
@@ -7989,7 +8005,7 @@ foreach (string path in oldFiles.Keys)
             if (!EnsureAdmin()) return;
             if (!EnsurePassword()) return;
 
-            if (MessageBox.Show(
+            if (Ui.Ask(
                     "Видалити застосунок?\n\r" +
                     "Буде видалено:\n" +
                     "  - службу моніторингу (якщо встановлено)\n" +
@@ -8035,7 +8051,7 @@ foreach (string path in oldFiles.Keys)
             bool deleteData = false;
             if (Directory.Exists(StorePaths.Directory))
             {
-                if (MessageBox.Show(
+                if (Ui.Ask(
                         "Видалити збережені дані?\n" +
                         "  - whitelist (список дозволених пристроїв)\n" +
                         "  - пароль захисту меню\n" +
@@ -8216,11 +8232,11 @@ foreach (string path in oldFiles.Keys)
                 }
                 if (!string.IsNullOrEmpty(current)) return current;
 
-                DialogResult dr = MessageBox.Show(
+                DialogResult dr = Ui.Ask(
                     "Додаткову комбінацію не задано.\n\n" +
                     "Журнал копіювання буде увімкнено, і відкривати його можна\n" +
                     "лише основною комбінацією " + HotkeyStore.DefaultText + ".\n\n" +
-                    "(«Ні» - повернутися до вибору комбінації)",
+                    "(«НІ» - повернутися до вибору комбінації)",
                     Program.Title, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                 if (dr == DialogResult.Yes) return string.Empty;
             }
@@ -8234,7 +8250,7 @@ foreach (string path in oldFiles.Keys)
                 sb.AppendLine("Пароль захисту вже встановлено.");
                 sb.AppendLine();
                 sb.AppendLine("Встановити новий пароль зараз?");
-                sb.AppendLine("«Ні» - лишити попередній пароль.");
+                sb.AppendLine("«НІ» - лишити попередній пароль.");
             }
             else
             {
@@ -8253,7 +8269,7 @@ foreach (string path in oldFiles.Keys)
                 sb.AppendLine("Забутий пароль видаляється пунктом «Видалити пароль».");
             }
 
-            if (MessageBox.Show(sb.ToString(), Program.Title,
+            if (Ui.Ask(sb.ToString(), Program.Title,
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
                 return true;
 
@@ -8306,13 +8322,13 @@ foreach (string path in oldFiles.Keys)
             StringBuilder sb = new StringBuilder();
             sb.AppendLine("Видалити пароль захисту?");
             sb.AppendLine();
-            sb.AppendLine("  «Так»       - підтвердити поточним паролем");
-            sb.AppendLine("  «Ні»        - підтвердити кодовим словом (якщо пароль забуто)");
-            sb.AppendLine("  «Скасувати» - нічого не робити");
+            sb.AppendLine("  «ТАК»       - підтвердити поточним паролем");
+            sb.AppendLine("  «НІ»        - підтвердити кодовим словом (якщо пароль забуто)");
+            sb.AppendLine("  «ВІДМІНА» - нічого не робити");
             sb.AppendLine();
             sb.AppendLine("Після видалення пункти 2, 3, 4, 6, 8, 9 будуть");
             sb.AppendLine("доступні без пароля.");
-            DialogResult how = MessageBox.Show(sb.ToString(), Program.Title,
+            DialogResult how = Ui.Ask(sb.ToString(), Program.Title,
                 MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
             if (how == DialogResult.Cancel) return;
 
@@ -8870,6 +8886,167 @@ foreach (string path in oldFiles.Keys)
                 if (i != null) { f.Icon = i; f.ShowIcon = true; }
             }
             catch { }
+        }
+
+        // Подтверждение с украинскими подписями кнопок (вместо системных
+        // русских «Да/Нет/Отмена» из MessageBox).
+        public static DialogResult Ask(string text, string title,
+            MessageBoxButtons buttons, MessageBoxIcon icon)
+        {
+            try
+            {
+                int[] ids;
+                string[] captions;
+                uint flags = 0;
+                if (buttons == MessageBoxButtons.YesNo)
+                {
+                    ids = new int[] { 6, 7 };
+                    captions = new string[] { "ТАК", "НІ" };
+                }
+                else if (buttons == MessageBoxButtons.YesNoCancel)
+                {
+                    ids = new int[] { 6, 7, 2 };
+                    captions = new string[] { "ТАК", "НІ", "ВІДМІНА" };
+                    flags = 0x0008;   // TDF_ALLOW_DIALOG_CANCELLATION
+                }
+                else
+                {
+                    return MessageBox.Show(text, title, buttons, icon);
+                }
+
+                int id = ShowTaskDialog(text, title, icon,
+                    ids, captions, 6, flags);
+                if (id < 0) return MessageBox.Show(text, title, buttons, icon);
+                if (id == 6) return DialogResult.Yes;
+                if (id == 7) return DialogResult.No;
+                return DialogResult.Cancel;
+            }
+            catch
+            {
+                return MessageBox.Show(text, title, buttons, icon);
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1, CharSet = CharSet.Unicode)]
+        private struct TaskDialogButton
+        {
+            public int Id;
+            public IntPtr Text;
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1, CharSet = CharSet.Unicode)]
+        private struct TaskDialogConfig
+        {
+            public uint Size;
+            public IntPtr Parent;
+            public IntPtr Instance;
+            public uint Flags;
+            public uint CommonButtons;
+            public IntPtr WindowTitle;
+            public IntPtr MainIcon;
+            public IntPtr MainInstruction;
+            public IntPtr Content;
+            public uint ButtonCount;
+            public IntPtr Buttons;
+            public int DefaultButton;
+            public uint RadioCount;
+            public IntPtr RadioButtons;
+            public int DefaultRadioButton;
+            public IntPtr VerificationText;
+            public IntPtr ExpandedInformation;
+            public IntPtr ExpandedControlText;
+            public IntPtr CollapsedControlText;
+            public IntPtr FooterIcon;
+            public IntPtr Footer;
+            public IntPtr Callback;
+            public IntPtr CallbackData;
+            public uint Width;
+        }
+
+        [DllImport("comctl32.dll", CharSet = CharSet.Unicode)]
+        private static extern int TaskDialogIndirect(ref TaskDialogConfig config,
+            out int button, out int radioButton, out bool verification);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetActiveWindow();
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr LoadIcon(IntPtr instance, IntPtr name);
+
+        private static int ShowTaskDialog(string text, string title,
+            MessageBoxIcon icon, int[] ids, string[] captions,
+            int defaultId, uint flags)
+        {
+            IntPtr[] texts = new IntPtr[captions.Length];
+            IntPtr buttons = IntPtr.Zero;
+            IntPtr windowTitle = IntPtr.Zero;
+            IntPtr content = IntPtr.Zero;
+            try
+            {
+                int stride = Marshal.SizeOf(typeof(TaskDialogButton));
+                buttons = Marshal.AllocHGlobal(stride * captions.Length);
+                for (int i = 0; i < captions.Length; i++)
+                {
+                    texts[i] = Marshal.StringToHGlobalUni(captions[i]);
+                    TaskDialogButton b = new TaskDialogButton();
+                    b.Id = ids[i];
+                    b.Text = texts[i];
+                    Marshal.StructureToPtr(b,
+                        new IntPtr(buttons.ToInt64() + i * stride), false);
+                }
+                windowTitle = Marshal.StringToHGlobalUni(title ?? string.Empty);
+                content = Marshal.StringToHGlobalUni(text ?? string.Empty);
+                TaskDialogConfig cfg = new TaskDialogConfig();
+                cfg.Size = (uint)Marshal.SizeOf(typeof(TaskDialogConfig));
+                cfg.Parent = GetActiveWindow();
+                cfg.Flags = flags;
+                cfg.WindowTitle = windowTitle;
+                if (icon == MessageBoxIcon.Question)
+                {
+                    cfg.Flags |= 0x0002;   // TDF_USE_HICON_MAIN
+                    cfg.MainIcon = LoadIcon(IntPtr.Zero, new IntPtr(32514));
+                }
+                else
+                {
+                    cfg.MainIcon = new IntPtr(IconResource(icon));
+                }
+                cfg.Content = content;
+                cfg.ButtonCount = (uint)captions.Length;
+                cfg.Buttons = buttons;
+                cfg.DefaultButton = defaultId;
+                int button, radio;
+                bool verification;
+                int hr = TaskDialogIndirect(ref cfg, out button, out radio,
+                    out verification);
+                if (hr != 0) return -1;
+                return button;
+            }
+            finally
+            {
+                for (int i = 0; i < texts.Length; i++)
+                    if (texts[i] != IntPtr.Zero) Marshal.FreeHGlobal(texts[i]);
+                if (buttons != IntPtr.Zero) Marshal.FreeHGlobal(buttons);
+                if (windowTitle != IntPtr.Zero) Marshal.FreeHGlobal(windowTitle);
+                if (content != IntPtr.Zero) Marshal.FreeHGlobal(content);
+            }
+        }
+
+        // Стандартный значок TaskDialog: 0xFFFF - предупреждение,
+        // 0xFFFE - ошибка, 0xFFFD - сведения, 0 - без значка.
+        private static int IconResource(MessageBoxIcon icon)
+        {
+            switch (icon)
+            {
+                case MessageBoxIcon.Error:
+                    return 0xFFFE;
+                case MessageBoxIcon.Question:
+                case MessageBoxIcon.Information:
+                    return 0xFFFD;
+                case MessageBoxIcon.Warning:
+                    return 0xFFFF;
+                default:
+                    return 0;
+            }
         }
 
         // Значок навесного замка заданной высоты (для поля пароля).

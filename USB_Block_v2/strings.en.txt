@@ -29,12 +29,12 @@
   8 Видалити службу\n	  8 Remove service\n
   9 Видалити застосунок	  9 Remove application
   <немає лога - показ ще не запускався>	  <no log - the display has not run yet>
-  «Ні»        - додати до поточного whitelist (об'єднати)	  "No"        - add to the current whitelist (merge)
-  «Ні»        - підтвердити кодовим словом (якщо пароль забуто)	  "No"        - confirm with the code word (if the password is forgotten)
-  «Скасувати» - нічого не робити	  "Cancel" - do nothing
-  «Скасувати» - скасувати	  "Cancel" - cancel
-  «Так»       - перезаписати (замінити) поточний whitelist	  "Yes"       - overwrite (replace) the current whitelist
-  «Так»       - підтвердити поточним паролем	  "Yes"       - confirm with the current password
+  «НІ»        - додати до поточного whitelist (об'єднати)	  "NO"        - add to the current whitelist (merge)
+  «НІ»        - підтвердити кодовим словом (якщо пароль забуто)	  "NO"        - confirm with the code word (if the password is forgotten)
+  «ВІДМІНА» - нічого не робити	  "CANCEL" - do nothing
+  «ВІДМІНА» - скасувати	  "CANCEL" - cancel
+  «ТАК»       - перезаписати (замінити) поточний whitelist	  "YES"       - overwrite (replace) the current whitelist
+  «ТАК»       - підтвердити поточним паролем	  "YES"       - confirm with the current password
   Ім'я пристрою: 	  Device name: 
   Додано: 	  Added: 
   Модель пристрою: 	  Device model: 
@@ -74,7 +74,7 @@
  файлів по 	 files of 
  хв тому	 min ago
  і 	 and 
-(«Ні» - повернутися до вибору комбінації)	("No" - return to the combination selection)
+(«НІ» - повернутися до вибору комбінації)	("NO" - return to the combination selection)
 (без вмісту файлів і без імені користувача).\n	(without file contents and without the user name).\n
 (без мітки)	(no label)
 (без імені)	(no name)
@@ -102,11 +102,11 @@
 . Усі USB-накопичувачі доступні.	. All USB drives are allowed.
 0 Переглянути WHITELIST...	0 View WHITELIST...
 1 Блокувати пристрої	1 Block devices
-1. Ім'я Пристрою	1. Device Name
+Ім'я пристрою	Device name
 2 Розблокувати пристрої	2 Unblock devices
-2. Тип Пристрою (ID):	2. Device Type (ID):
+USB-ідентифікатор	USB identifier
 3 Додати пристрій	3 Add device
-3. Модель Пристрою (Vendor ID):	3. Device Model (Vendor ID):
+Модель пристрою	Device model
 4 Видалити пристрій із WHITELIST...	4 Remove device from WHITELIST...
 5 Експортувати WHITELIST...	5 Export WHITELIST...
 6 Імпортувати WHITELIST...	6 Import WHITELIST...
@@ -126,7 +126,7 @@ WHITELIST експортовано:\n	WHITELIST exported:\n
 WHITELIST замінено: 	WHITELIST replaced: 
 WHITELIST об'єднано:\n	WHITELIST merged:\n
 WHITELIST порожній - видаляти нічого.	WHITELIST is empty - nothing to remove.
-«Ні» - лишити попередній пароль.	"No" - keep the previous password.
+«НІ» - лишити попередній пароль.	"NO" - keep the previous password.
 Імпорт WHITELIST	Import WHITELIST
 Імпортовано записів (пристроїв): 	Imported entries (devices): 
 Адміністратор: 	Administrator: 
@@ -304,6 +304,9 @@ WHITELIST порожній - видаляти нічого.	WHITELIST is empty -
 СЛУЖБА	SERVICE
 СТАТУС: 	STATUS: 
 Скасувати	Cancel
+ТАК	YES
+НІ	NO
+ВІДМІНА	CANCEL
 Служба моніторингу: 	Monitoring service: 
 Службові записи	Service records
 Службу встановлено, але не вдалося налаштувати значок у треї\n	The service was installed, but the tray icon could not be configured\n
