@@ -21,8 +21,8 @@ using Microsoft.Win32;
 // Версия программы. Та же цифра стоит и в app.manifest (assemblyIdentity):
 // при каждой сборке обновляются ОБЕ, иначе в свойствах файла и в манифесте
 // разойдутся. Проверка - в самопроверке ("Build version").
-[assembly: AssemblyVersion("2.0.8.0")]
-[assembly: AssemblyFileVersion("2.0.8.0")]
+[assembly: AssemblyVersion("2.0.9.0")]
+[assembly: AssemblyFileVersion("2.0.9.0")]
 
 namespace UsbBlockTray
 {
@@ -87,8 +87,9 @@ namespace UsbBlockTray
             }
 
             // КОНТРОЛЬ СЛУЖБЫ (--ensure-service): запускается задачей
-            // планировщика от SYSTEM раз в минуту. Если службу остановили
-            // или отключили, поднимает её обратно. Без UI.
+            // планировщика от SYSTEM раз в минуту. Если службу остановили,
+            // отключили или удалили, возвращает её в рабочее состояние
+            // (удалённую - ставит заново). Без UI.
             if (ensureService)
             {
                 ServiceManager.EnsureRunning();
@@ -6898,8 +6899,9 @@ foreach (string path in oldFiles.Keys)
         }
 
         // Задача контроля службы: раз в минуту от имени SYSTEM запускает
-        // --ensure-service, который поднимает службу, если её остановили или
-        // отключили. Скрытая, без ограничения времени выполнения.
+        // --ensure-service, который поднимает службу, если её остановили,
+        // отключили или удалили (удалённую ставит заново). Скрытая, без
+        // ограничения времени выполнения.
         private static string BuildGuardXml()
         {
             string command = "\"" + ProtectedCopy.InstallExe + "\"";
@@ -9254,32 +9256,91 @@ foreach (string path in oldFiles.Keys)
         }
 
         // Контроль службы (режим --ensure-service, запускается задачей от
-        // SYSTEM раз в минуту): если службу остановили или отключили -
-        // вернуть её в рабочее состояние.
+        // SYSTEM раз в минуту): если службу остановили, отключили,
+        // перенастроили или удалили - вернуть её в рабочее состояние.
+        // Главное здесь - пересоздание УДАЛЁННОЙ службы: "sc delete",
+        // удаление ключа службы или оснастка "Службы" больше не выключают
+        // защиту, служба ставится заново из защищённой копии.
         public static void EnsureRunning()
         {
             try
             {
-                if (!IsInstalled()) return;
+                if (!IsInstalled())
+                {
+                    Install();
+                    return;
+                }
+
+                string wanted = "\"" + ProtectedCopy.InstallExe + "\" --service";
+                bool restart = false;
                 try
                 {
                     using (ManagementObject svc = new ManagementObject(
                         @"\\.\root\cimv2:Win32_Service.Name='" + ServiceName + "'"))
                     {
+                        ManagementBaseObject inParams = svc.GetMethodParameters("Change");
+                        bool change = false;
+                        object path = svc["PathName"];
+                        if (path == null || !string.Equals(
+                            path.ToString().Trim(), wanted, StringComparison.OrdinalIgnoreCase))
+                        {
+                            inParams["PathName"] = wanted;
+                            change = true;
+                        }
                         object startMode = svc["StartMode"];
                         if (startMode != null && !string.Equals(
                             startMode.ToString(), "Auto", StringComparison.OrdinalIgnoreCase))
                         {
-                            ManagementBaseObject inParams = svc.GetMethodParameters("Change");
                             inParams["StartMode"] = "Automatic";
+                            change = true;
+                        }
+                        if (change)
+                        {
                             svc.InvokeMethod("Change", inParams, null);
+                            restart = true;
+                        }
+                        object startName = svc["StartName"];
+                        if (startName != null && !string.Equals(
+                            startName.ToString(), "LocalSystem", StringComparison.OrdinalIgnoreCase))
+                        {
+                            try
+                            {
+                                ManagementBaseObject p2 = svc.GetMethodParameters("Change");
+                                p2["StartName"] = "LocalSystem";
+                                svc.InvokeMethod("Change", p2, null);
+                                restart = true;
+                            }
+                            catch
+                            {
+                            }
                         }
                     }
                 }
                 catch
                 {
                 }
+                if (restart) Stop();
                 Start();
+            }
+            catch
+            {
+            }
+        }
+
+        public static void Stop()
+        {
+            try
+            {
+                using (ServiceController sc = new ServiceController(ServiceName))
+                {
+                    if (sc.Status != ServiceControllerStatus.Stopped &&
+                        sc.Status != ServiceControllerStatus.StopPending)
+                    {
+                        sc.Stop();
+                        sc.WaitForStatus(ServiceControllerStatus.Stopped,
+                            TimeSpan.FromSeconds(20));
+                    }
+                }
             }
             catch
             {
@@ -9309,38 +9370,43 @@ foreach (string path in oldFiles.Keys)
         {
             try
             {
-                if (!IsInstalled()) return null;
-                ClearRecovery();
-                using (ServiceController sc = new ServiceController(ServiceName))
+                if (!IsInstalled())
                 {
-                    if (sc.Status != ServiceControllerStatus.Stopped &&
-                        sc.Status != ServiceControllerStatus.StopPending)
-                    {
-                        try
-                        {
-                            sc.Stop();
-                            sc.WaitForStatus(ServiceControllerStatus.Stopped,
-                                TimeSpan.FromSeconds(20));
-                        }
-                        catch
-                        {
-                            // останавливается при удалении
-                        }
-                    }
+                    TrayTask.DeleteGuard();
+                    return null;
                 }
+                // Сначала снимаем задачу контроля: иначе она по новой
+                // поставит только что удалённую службу (EnsureRunning).
+                TrayTask.DeleteGuard();
+                ClearRecovery();
+                Stop();
+                // Служба могла успеть пересоздать задачу, пока останавливалась.
+                TrayTask.DeleteGuard();
                 using (ManagementObject svc = new ManagementObject(
                     @"\\.\root\cimv2:Win32_Service.Name='" + ServiceName + "'"))
                 {
                     ManagementBaseObject outParams = svc.InvokeMethod("Delete", null, null);
                     uint ret = (uint)(outParams["ReturnValue"] ?? 0);
                     if (ret != 0)
+                    {
+                        // Не удалось - возвращаем самовосстановление, чтобы
+                        // защита не осталась выключенной.
+                        try { TrayTask.CreateGuardTask(); } catch { }
+                        Start();
                         return Loc.T("Не вдалося видалити службу (код ") +
                             ret.ToString(CultureInfo.InvariantCulture) + ")";
-                    return null;
+                    }
                 }
+                // Если во время удаления службу успели запустить - гасим её,
+                // иначе она останется работать до перезагрузки.
+                Stop();
+                TrayTask.DeleteGuard();
+                return null;
             }
             catch (Exception ex)
             {
+                try { TrayTask.CreateGuardTask(); } catch { }
+                Start();
                 return ex.Message;
             }
         }
