@@ -21,8 +21,8 @@ using Microsoft.Win32;
 // Версия программы. Та же цифра стоит и в app.manifest (assemblyIdentity):
 // при каждой сборке обновляются ОБЕ, иначе в свойствах файла и в манифесте
 // разойдутся. Проверка - в самопроверке ("Build version").
-[assembly: AssemblyVersion("2.0.9.0")]
-[assembly: AssemblyFileVersion("2.0.9.0")]
+[assembly: AssemblyVersion("2.0.10.0")]
+[assembly: AssemblyFileVersion("2.0.10.0")]
 
 namespace UsbBlockTray
 {
@@ -1512,7 +1512,21 @@ namespace UsbBlockTray
             if (v == null || string.IsNullOrEmpty(v.DriveLetter)) return false;
             string volPath = GetVolumePath(v.DriveLetter);
             if (!string.IsNullOrEmpty(volPath))
+            {
                 Track(v.DriveLetter, volPath, v.Serial, v.UsbId);
+                // Метка нужна позже, когда буквы уже не будет (окно
+                // «Додати пристрій»): запоминаем её до снятия точки.
+                try
+                {
+                    string label;
+                    Dictionary<string, string> labels = UsbQuery.GetVolumeLabels();
+                    if (labels.TryGetValue(v.DriveLetter, out label))
+                        UsbQuery.RememberVolumeLabel(volPath, label);
+                }
+                catch
+                {
+                }
+            }
             string o;
             return Exec.Run("mountvol.exe", v.DriveLetter + ": /p", out o);
         }
@@ -1863,6 +1877,76 @@ namespace UsbBlockTray
             {
             }
             return map;
+        }
+
+        private const string LabelCacheKey = @"SOFTWARE\USB_Block\VolumeLabels";
+
+        // Метка тома, снятого с монтирования (путь тома -> метка). У
+        // заблокированного накопителя уже нет буквы, Win32_LogicalDisk его
+        // не показывает; кэш заполняется в момент снятия буквы.
+        public static string CachedVolumeLabel(string volumePath)
+        {
+            if (string.IsNullOrEmpty(volumePath)) return null;
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(LabelCacheKey, false))
+                {
+                    if (k == null) return null;
+                    return k.GetValue(volumePath.TrimEnd('\\')) as string;
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        public static void RememberVolumeLabel(string volumePath, string label)
+        {
+            if (string.IsNullOrEmpty(volumePath)) return;
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.CreateSubKey(LabelCacheKey))
+                {
+                    if (k == null) return;
+                    k.SetValue(volumePath.TrimEnd('\\'), label ?? string.Empty,
+                        RegistryValueKind.String);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        // Метка тома по пути \\?\Volume{GUID}\ - даже если у тома нет буквы
+        // (заблокированный накопитель): Win32_Volume читает метку из ФС.
+        public static string GetVolumeLabelByPath(string volumePath)
+        {
+            if (string.IsNullOrEmpty(volumePath)) return null;
+            string cached = CachedVolumeLabel(volumePath);
+            if (cached != null) return cached;
+            try
+            {
+                string want = volumePath.TrimEnd('\\');
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
+                    "root\\cimv2", "SELECT DeviceID, Label FROM Win32_Volume"))
+                using (ManagementObjectCollection coll = searcher.Get())
+                {
+                    foreach (ManagementObject mo in coll)
+                    {
+                        string dev = mo["DeviceID"] as string;
+                        if (string.IsNullOrEmpty(dev)) continue;
+                        if (!string.Equals(dev.TrimEnd('\\'), want,
+                            StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        return ((mo["Label"] as string) ?? string.Empty).Trim();
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return null;
         }
 
         private static List<UsbVolume> GetVolumes(bool usbOnly)
@@ -5525,7 +5609,7 @@ foreach (string path in oldFiles.Keys)
             lblName.Location = new Point(14, 72);
 
             _tbName = new System.Windows.Forms.TextBox();
-            _tbName.Text = Loc.T("Новий Пристрій");
+            _tbName.Text = Loc.T("USB-пристрій");
             _tbName.SetBounds(14, 92, 512, 23);
 
             Label lblType = new Label();
@@ -5638,9 +5722,11 @@ foreach (string path in oldFiles.Keys)
             _tbModel.Text = string.IsNullOrEmpty(sd.BestDiskId) ? sd.Model : sd.BestDiskId;
             _ok.Enabled = !string.IsNullOrEmpty(sd.UsbId);
             // По умолчанию в "Ім'я Пристрою" подставляется метка тома
-            // выбранного накопителя (если метки нет - поле пустое, и при
-            // добавлении возьмётся название модели).
-            _tbName.Text = sd.Label ?? string.Empty;
+            // выбранного накопителя. Если метки нет - подставляем "USB-пристрій".
+            string def = sd.Label;
+            if (string.IsNullOrEmpty(def))
+                def = Loc.T("USB-пристрій");
+            _tbName.Text = def ?? string.Empty;
         }
 
         private void Commit()
@@ -5659,8 +5745,100 @@ foreach (string path in oldFiles.Keys)
                     Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
+
+            string label = (sd.Label ?? string.Empty).Trim();
+            string name = (_tbName.Text ?? string.Empty).Trim();
+            // Если у накопителя нет метки, по умолчанию подставляем
+            // "USB-пристрій", но имя должно быть задано пользователем
+            // осознанно (пустое не принимаем).
+            if (name.Length == 0) name = Loc.T("USB-пристрій");
+            // Имя обязательно, пустое не принимается.
+            if (name.Length == 0)
+            {
+                MessageBox.Show(Loc.T("Введіть ім'я пристрою - порожнє ім'я не дозволено."),
+                    Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                _tbName.Focus();
+                return;
+            }
+            // Проверка дубля имени в whitelist: два разных устройства не
+            // должны иметь одно и то же имя.
+            try
+            {
+                foreach (DeviceEntry x in UsbMonitor.GetWhitelist())
+                {
+                    if (string.IsNullOrEmpty(x.Name)) continue;
+                    if (string.Equals(x.Name.Trim(), name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        MessageBox.Show(Loc.T("Пристрій з таким ім'ям уже є в whitelist.\n") +
+                                        Loc.T("Введіть інше ім'я."),
+                            Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        _tbName.Focus();
+                        _tbName.SelectAll();
+                        return;
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            // Имя обязательно, пустое не принимается. Если поле пустое или
+            // в нём осталась подставленная автоматически метка тома -
+            // спрашиваем: оставить эту метку или ввести свою.
+            if ((label.Length > 0 && string.Equals(name, label, StringComparison.Ordinal)))
+            {
+                if (label.Length == 0)
+                {
+                    MessageBox.Show(Loc.T("Введіть ім'я пристрою - порожнє ім'я не дозволено."),
+                        Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    _tbName.Focus();
+                    return;
+                }
+                string msg = Loc.T("Для пристрою знайдено мітку тому:") +
+                    "\n«" + label + "»\n\n" +
+                    Loc.T("Залишити її як ім'я пристрою в whitelist?") + "\n" +
+                    Loc.T("ТАК - залишити мітку, НІ - ввести власну назву.");
+                DialogResult keep = Ui.Ask(msg, Program.Title,
+                    MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+                if (keep == DialogResult.Yes)
+                {
+                    name = label;
+                }
+                else if (keep == DialogResult.No)
+                {
+                    // Своя назва: очищаем поле и ставим в него курсор.
+                    _tbName.Text = string.Empty;
+                    _tbName.Focus();
+                    return;
+                }
+                else
+                {
+                    return;
+                }
+                // Повторная проверка дубля после выбора метки.
+                try
+                {
+                    foreach (DeviceEntry x in UsbMonitor.GetWhitelist())
+                    {
+                        if (string.IsNullOrEmpty(x.Name)) continue;
+                        if (string.Equals(x.Name.Trim(), name, StringComparison.OrdinalIgnoreCase))
+                        {
+                            MessageBox.Show(Loc.T("Пристрій з таким ім'ям уже є в whitelist.\n") +
+                                            Loc.T("Введіть інше ім'я."),
+                                Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            _tbName.Focus();
+                            _tbName.SelectAll();
+                            return;
+                        }
+                    }
+                }
+                catch
+                {
+                }
+            }
+
             Selected = sd;
-            DeviceName = _tbName.Text;
+            DeviceName = name;
             this.DialogResult = DialogResult.OK;
             this.Close();
         }
@@ -7512,16 +7690,24 @@ foreach (string path in oldFiles.Keys)
             {
                 if (string.IsNullOrEmpty(rec.Serial)) continue;
 
-                bool exists = false;
+                StorageDevice found = null;
                 foreach (StorageDevice d in devices)
                 {
                     if (string.Equals(d.Serial, rec.Serial, StringComparison.OrdinalIgnoreCase))
                     {
-                        exists = true;
+                        found = d;
                         break;
                     }
                 }
-                if (exists) continue;
+                if (found != null)
+                {
+                    // У заблокированного тома нет буквы: метку достаём по
+                    // пути тома (кэш или Win32_Volume), иначе поле имени
+                    // осталось бы пустым и вопрос не появился бы.
+                    if (string.IsNullOrEmpty(found.Label))
+                        found.Label = UsbQuery.GetVolumeLabelByPath(rec.VolumePath);
+                    continue;
+                }
 
                 StorageDevice sd = new StorageDevice();
                 sd.Serial = rec.Serial;
@@ -7530,6 +7716,7 @@ foreach (string path in oldFiles.Keys)
                     : rec.UsbId;
                 sd.BestDiskId = UsbQuery.FindDiskIdBySerial(rec.Serial);
                 sd.Model = Loc.T("(заблоковано)");
+                sd.Label = UsbQuery.GetVolumeLabelByPath(rec.VolumePath);
                 devices.Add(sd);
             }
 
@@ -7554,7 +7741,8 @@ foreach (string path in oldFiles.Keys)
                 {
                     if (string.IsNullOrEmpty(d.Serial)) continue;
                     string lab;
-                    if (labelBySerial.TryGetValue(d.Serial, out lab))
+                    if (labelBySerial.TryGetValue(d.Serial, out lab) &&
+                        string.IsNullOrEmpty(d.Label))
                         d.Label = lab;
                 }
             }

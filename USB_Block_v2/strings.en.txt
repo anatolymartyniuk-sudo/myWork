@@ -145,6 +145,9 @@ WHITELIST порожній - видаляти нічого.	WHITELIST is empty -
 Введіть пароль для доступу до цього пункту меню:	Enter the password to access this menu item:
 Введіть пароль.	Enter the password.
 Введіть поточний пароль:	Enter the current password:
+Введіть ім'я пристрою - порожнє ім'я не дозволено.	Enter a device name - an empty name is not allowed.
+Пристрій з таким ім'ям уже є в whitelist.	A device with this name already exists in the whitelist.
+Введіть інше ім'я.	Enter a different name.
 Веде журнал: 	Journal kept by: 
 Виберіть USB-накопичувач:	Select a USB drive:
 Виберіть пристрій для видалення з WHITELIST:\n	Select a device to remove from WHITELIST:\n
@@ -165,6 +168,7 @@ WHITELIST порожній - видаляти нічого.	WHITELIST is empty -
 Відкрити файл журналу	Open the journal file
 Відкрити файл...	Open file...
 Джерело журналу подій (	Event log source (
+Для пристрою знайдено мітку тому:	A volume label was found for this device:
 До журналу	To journal
 Додайте основну клавішу (наприклад Ctrl+Alt+U).	Add the main key (for example Ctrl+Alt+U).
 Додано пристроїв: 	Devices added: 
@@ -202,6 +206,7 @@ WHITELIST порожній - видаляти нічого.	WHITELIST is empty -
 Задача сповіщувача (--notify): 	Notifier task (--notify): 
 Задача трея (--logon): 	Tray task (--logon): 
 Закрити	Close
+Залишити її як ім'я пристрою в whitelist?	Keep it as the device name in the whitelist?
 Запам'ятайте пароль: він зберігається лише у вигляді хеша.	Remember the password: it is stored only as a hash.
 Запис у чергу (HKLM\\SOFTWARE\\USB_Block\\Events): 	Queue write (HKLM\\SOFTWARE\\USB_Block\\Events): 
 Записуються: скопійовані, змінені, видалені\n	Recorded: copied, changed, deleted\n
@@ -249,7 +254,7 @@ WHITELIST порожній - видаляти нічого.	WHITELIST is empty -
 Невірне кодове слово.\nЗалишилося спроб: 	Invalid code word.\nAttempts left: 
 Невірний пароль.\nЗалишилося спроб: 	Invalid password.\nAttempts left: 
 Немає USB-накопичувачів.\n	No USB drives.\n
-Новий Пристрій	New Device
+USB-пристрій	USB device
 Новий пароль:	New password:
 ОК	OK
 Оновити	Refresh
@@ -305,6 +310,7 @@ WHITELIST порожній - видаляти нічого.	WHITELIST is empty -
 СТАТУС: 	STATUS: 
 Скасувати	Cancel
 ТАК	YES
+ТАК - залишити мітку, НІ - ввести власну назву.	YES - keep the label, NO - enter your own name.
 НІ	NO
 ВІДМІНА	CANCEL
 Служба моніторингу: 	Monitoring service: 
