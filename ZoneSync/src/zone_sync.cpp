@@ -1,4 +1,4 @@
-// =====================================================================
+﻿// =====================================================================
 // Zone Sync - двостороння синхронізація файлів і папок між локальною
 // папкою та знімними носіями. Трей + автозапуск + миттєва реакція.
 //
@@ -24,7 +24,7 @@
 #include <map>
 #include <algorithm>
 
-static const wchar_t* APP_VERSION = L"1.0.2.1";
+static const wchar_t* APP_VERSION = L"1.0.2.2";
 
 // ---------------------------------------------------------------------
 // Константи.
@@ -85,7 +85,7 @@ enum StrId {
     S_REMOVE_FILE_TITLE, S_MUST_BE_IN_LOCAL, S_TYPE_FOLDER,
     S_ERROR, S_LANG_APPLIED, S_COPIED_TO_INSTALL,
     S_UPDATE_AVAILABLE, S_UPDATE_INSTALL, S_UPDATE_FAIL,
-    S_CHOOSE_FLASH_PLACE, S_NO_FLASH_PLACE
+    S_CHOOSE_FLASH_PLACE, S_NO_FLASH_PLACE, S_STORED_UNTIL, S_BACKUP_CREATED
 };
 
 struct Str { const wchar_t* ua; const wchar_t* en; };
@@ -145,6 +145,8 @@ static const Str STRINGS[] = {
                                           L"Choose the flash location for '{}'\n(OK - flash root)" },
     { L"Флешка не підключена - розташування на флешці: корінь (змінюється у files.txt)",
                                           L"Flash drive not connected - flash location: root (edit in files.txt)" },
+    { L"зберігається до",                 L"stored until" },
+    { L"Створено бекап",                  L"Backup created" },
 };
 static const int STR_COUNT = (int)(sizeof(STRINGS) / sizeof(STRINGS[0]));
 
@@ -218,6 +220,10 @@ static std::wstring TimeStampForFile()
 static std::wstring g_configPath;   // %ProgramData%\ZoneSync\files.txt
 static std::wstring g_logPath;      // LocalDir\zone_sync.log
 static std::wstring g_installPath;  // Program Files\Zone_Sync\zone_sync.exe
+static std::wstring g_backupDir;    // Program Files\Zone_Sync\BackUP
+static std::wstring g_progDataDir;  // %ProgramData%\ZoneSync
+static bool g_logFallback = false;  // true - лог в %ProgramData% (запись в PF не удалась)
+static bool g_bakFallback = false;  // true - бекапы в %ProgramData%
 static HWND  g_hwnd = nullptr;
 static bool  g_trayAdded = false;
 
@@ -235,13 +241,17 @@ static void InitPaths()
     SHGetSpecialFolderPathW(nullptr, pf, CSIDL_PROGRAM_FILES, FALSE);
     g_installPath = std::wstring(pf) + L"\\" + INSTALL_DIR + L"\\zone_sync.exe";
 
-    // %ProgramData%\ZoneSync\files.txt.
+    // %ProgramData%\ZoneSync\ (фолбэк для не-адмін запусков).
     wchar_t pd[MAX_PATH] = { 0 };
     GetEnvironmentVariableW(L"ProgramData", pd, MAX_PATH);
-    std::wstring dir = std::wstring(pd) + L"\\" + CONFIG_DIR_ENV;
-    CreateDirectoryW(dir.c_str(), nullptr);
-    g_configPath = dir + L"\\" + CONFIG_NAME;
-    g_logPath = std::wstring(LOG_DIR) + L"\\" + LOG_NAME;
+    g_progDataDir = std::wstring(pd) + L"\\" + CONFIG_DIR_ENV;
+    CreateDirectoryW(g_progDataDir.c_str(), nullptr);
+
+    // Канонические пути: Program Files\Zone_Sync\.
+    g_configPath = g_installPath.substr(0, g_installPath.find_last_of(L"\\")) + L"\\" + CONFIG_NAME;
+    g_logPath = g_installPath.substr(0, g_installPath.find_last_of(L"\\")) + L"\\" + LOG_NAME;
+    g_backupDir = g_installPath.substr(0, g_installPath.find_last_of(L"\\")) + L"\\BackUP";
+    CreateDirectoryW(g_backupDir.c_str(), nullptr);
 }
 
 static void LoadLang()
@@ -416,6 +426,19 @@ static void WriteLog(const std::wstring& msg)
         DWORD w = 0;
         WriteFile(f2, line.c_str(), (DWORD)line.size(), &w, nullptr);
         CloseHandle(f2);
+        return;
+    }
+    // Фолбэк: лог в %ProgramData%\ZoneSync\ (запись в Program Files не удалась).
+    g_logFallback = true;
+    std::wstring altLog = g_progDataDir + L"\\zone_sync.log";
+    HANDLE f3 = CreateFileW(altLog.c_str(), FILE_APPEND_DATA,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE,
+                            nullptr, OPEN_ALWAYS, 0, nullptr);
+    if (f3 != INVALID_HANDLE_VALUE) {
+        SetFilePointer(f3, 0, nullptr, FILE_END);
+        DWORD w = 0;
+        WriteFile(f3, line.c_str(), (DWORD)line.size(), &w, nullptr);
+        CloseHandle(f3);
     }
 }
 
@@ -449,24 +472,92 @@ static ULARGE_INTEGER FileTimeOf(const std::wstring& path, bool* exists)
 }
 
 // ---------------------------------------------------------------------
-// Бекап: name.ext -> name.bak_<штамп>.ext
+// Бекап: НЕ рядом с файлом, а в Program Files\Zone_Sync\BackUP\
+// (унікальне ім'я = санітизований повний шлях + штамп). Зберігається
+// добу, потім видаляється (CleanupBackups).
 // ---------------------------------------------------------------------
+static std::wstring SanitizeName(const std::wstring& path)
+{
+    std::wstring s = path;
+    for (size_t i = 0; i < s.size(); i++) {
+        wchar_t c = s[i];
+        if (c == L'\\' || c == L'/' || c == L':') s[i] = L'_';
+    }
+    return s;
+}
+
+static std::wstring DeletionTimeText()
+{
+    SYSTEMTIME t; GetLocalTime(&t);
+    FILETIME ft;
+    SYSTEMTIME st = t;
+    SystemTimeToFileTime(&st, &ft);
+    ULARGE_INTEGER u; u.LowPart = ft.dwLowDateTime; u.HighPart = ft.dwHighDateTime;
+    u.QuadPart += 24ULL * 3600ULL * 10000000ULL;   // +24 год
+    ft.dwLowDateTime = u.LowPart; ft.dwHighDateTime = u.HighPart;
+    SYSTEMTIME out; FileTimeToSystemTime(&ft, &out);
+    wchar_t b[32];
+    wsprintfW(b, L"%04u-%02u-%02u %02u:%02u",
+              out.wYear, out.wMonth, out.wDay, out.wHour, out.wMinute);
+    return b;
+}
+
 static std::wstring BackupOldCopy(const std::wstring& path)
 {
-    size_t slash = path.find_last_of(L'\\');
     size_t dot = path.find_last_of(L'.');
-    std::wstring dir = (slash == std::wstring::npos) ? L"." : path.substr(0, slash);
+    size_t slash = path.find_last_of(L'\\');
     std::wstring base = (slash == std::wstring::npos) ? path : path.substr(slash + 1);
     std::wstring ext, stem = base;
     if (dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash)) {
         stem = base.substr(0, dot - slash - 1);
         ext  = base.substr(dot - slash - 1);
     }
-    std::wstring bak = dir + L"\\" + stem + L".bak_" + TimeStampForFile() + ext;
+    std::wstring bakDir = g_backupDir;
+    if (g_bakFallback) bakDir = g_progDataDir + L"\\BackUP";
+    std::wstring bak = bakDir + L"\\" +
+        SanitizeName(path) + L"_" + TimeStampForFile() + ext;
     if (CopyFileW(path.c_str(), bak.c_str(), TRUE)) return bak;
+    // Программа Files недоступна для записи -> фолбэк на %ProgramData%.
+    CreateDirectoryW((g_progDataDir + L"\\BackUP").c_str(), nullptr);
+    bak = g_progDataDir + L"\\BackUP\\" +
+        SanitizeName(path) + L"_" + TimeStampForFile() + ext;
+    if (CopyFileW(path.c_str(), bak.c_str(), TRUE)) { g_bakFallback = true; return bak; }
     return L"";
 }
 
+// Видалення бекапів старших доби.
+static void CleanupBackupsIn(const std::wstring& dir)
+{
+    if (GetFileAttributesW(dir.c_str()) == INVALID_FILE_ATTRIBUTES)
+        return;
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER cutoff;
+    cutoff.LowPart = ft.dwLowDateTime;
+    cutoff.HighPart = ft.dwHighDateTime;
+    cutoff.QuadPart -= 24ULL * 3600ULL * 10000000ULL;   // старше доби
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        ULARGE_INTEGER u;
+        u.LowPart = fd.ftLastWriteTime.dwLowDateTime;
+        u.HighPart = fd.ftLastWriteTime.dwHighDateTime;
+        if (u.QuadPart < cutoff.QuadPart) {
+            std::wstring p = dir + L"\\" + fd.cFileName;
+            if (DeleteFileW(p.c_str()))
+                WriteLog(std::wstring(L"Бекап видалено (доба минула): ") + fd.cFileName);
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+static void CleanupBackups()
+{
+    CleanupBackupsIn(g_backupDir);
+    CleanupBackupsIn(g_progDataDir + L"\\BackUP");
+}
 // Файл заблоковано іншою програмою (БУДЬ-ЯКИЙ тип файлу, не лише Excel):
 // спроба відкрити з потрібним доступом без розділення. wantWrite -
 // потрібен запис (перезаписуваний бік); інакше лише читання.
@@ -540,6 +631,7 @@ static void WalkTree(const std::wstring& root, const std::wstring& prefix,
 // ---------------------------------------------------------------------
 static void SyncFileItem(const SyncItem& item, bool dry,
                          std::vector<std::wstring>* done,
+                         std::vector<std::wstring>* backups,
                          std::wstring* firstError, int* identicalCount)
 {
     std::wstring local = item.localPath;
@@ -613,6 +705,8 @@ static void SyncFileItem(const SyncItem& item, bool dry,
                 continue;
             }
             WriteLog(L"  " + S(S_BACKUP) + L": " + bak);
+            backups->push_back(S(S_BACKUP) + L": " + item.flashName +
+                L" — " + S(S_STORED_UNTIL) + L" " + DeletionTimeText());
         }
 
         CreateParentDirs(dst);
@@ -637,6 +731,7 @@ static void SyncFileItem(const SyncItem& item, bool dry,
 // ---------------------------------------------------------------------
 static void SyncFolderPair(const SyncItem& item, bool dry,
                            std::vector<std::wstring>* done,
+                           std::vector<std::wstring>* backups,
                            std::wstring* firstError, int* identicalCount)
 {
     std::wstring localRoot = item.localPath;
@@ -701,6 +796,8 @@ static void SyncFolderPair(const SyncItem& item, bool dry,
                 continue;
             }
             WriteLog(L"  " + S(S_BACKUP) + L": " + bak);
+            backups->push_back(S(S_BACKUP) + L": " + item.flashName + L"\\" + rel +
+                L" — " + S(S_STORED_UNTIL) + L" " + DeletionTimeText());
             if (CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
                 WriteLog(L"  " + S(S_COPIED));
                 done->push_back(dirText);
@@ -736,11 +833,12 @@ static void SyncFolderPair(const SyncItem& item, bool dry,
 // Один прохід синхронізації. balloonOut - текст для баллуна
 // (порожній - нічого не змінено, silent); isError - балун-помилка.
 // ---------------------------------------------------------------------
-static void DoSyncOnce(bool notify, std::wstring* balloonOut, bool* isError)
+static void DoSyncOnce(bool dry, std::wstring* balloonOut, bool* isError)
 {
-    std::vector<std::wstring> done;   // напрямки скопійованих
+    std::vector<std::wstring> done;    // напрямки скопійованих
+    std::vector<std::wstring> backups; // створені бекапи
     std::wstring firstError;
-    int identical = 0;                // пар "копії ідентичні"
+    int identical = 0;                 // пар "копії ідентичні"
 
     LoadItems();   // щоразу свіжо (редагування списку).
 
@@ -751,22 +849,28 @@ static void DoSyncOnce(bool notify, std::wstring* balloonOut, bool* isError)
 
     for (size_t i = 0; i < g_items.size(); i++) {
         if (g_items[i].type == L'F')
-            SyncFileItem(g_items[i], notify, &done, &firstError, &identical);
+            SyncFileItem(g_items[i], dry, &done, &backups, &firstError, &identical);
         else
-            SyncFolderPair(g_items[i], notify, &done, &firstError, &identical);
+            SyncFolderPair(g_items[i], dry, &done, &backups, &firstError, &identical);
     }
 
     if (balloonOut) {
         if (!firstError.empty()) {
             *balloonOut = firstError; *isError = true;
-        } else if (!done.empty()) {
-            std::wstring dirs;
-            for (size_t i = 0; i < done.size() && i < 4; i++) {
-                if (i) dirs += L"\n";
-                dirs += done[i];
+        } else if (!done.empty() || !backups.empty()) {
+            std::wstring lines;
+            size_t shown = 0;
+            for (size_t i = 0; i < done.size() && shown < 4; i++, shown++) {
+                if (shown) lines += L"\n";
+                lines += done[i];
             }
-            if (done.size() > 4) dirs += L"  …";
-            *balloonOut = S(S_SYNC_DONE) + L"\n" + dirs;
+            for (size_t i = 0; i < backups.size() && shown < 4; i++, shown++) {
+                if (shown) lines += L"\n";
+                lines += backups[i];
+            }
+            if (done.size() + backups.size() > 4) lines += L"  …";
+            std::wstring head = done.empty() ? S(S_BACKUP_CREATED) : S(S_SYNC_DONE);
+            *balloonOut = head + L"\n" + lines;
             *isError = false;
         } else if (identical > 0) {
             // Копії ідентичні - теж повідомлення (з кількістю пар).
@@ -991,6 +1095,9 @@ static bool StartTarget()
 }
 
 // Підвищений ретрай: копіює себе в Program Files і запускає звідти.
+// Попереднє оголошення (використовується раніше за визначення).
+static bool RunHidden(const wchar_t* cmdline, DWORD* exitCode = nullptr);
+
 static int RunInstallCopy()
 {
     wchar_t self[MAX_PATH];
@@ -998,6 +1105,14 @@ static int RunInstallCopy()
     size_t slash = g_installPath.find_last_of(L'\\');
     if (slash != std::wstring::npos)
         CreateDirectoryW(g_installPath.substr(0, slash).c_str(), nullptr);
+    // Папка бекапів + право запису для звичайних користувачів
+    // (трей працює без підвищення, а бекапи пишуться сюди).
+    std::wstring bkDir = g_installPath.substr(0, slash) + L"\\BackUP";
+    CreateDirectoryW(bkDir.c_str(), nullptr);
+    std::wstring icacls = std::wstring(L"icacls.exe \"") + bkDir +
+        L"\" /grant *S-1-5-11:(OI)(CI)M";
+    DWORD icaclsCode = 1;
+    RunHidden(icacls.c_str(), &icaclsCode);
     if (!CopyFileW(self, g_installPath.c_str(), FALSE)) return 2;
     WriteLog(S(S_COPIED_TO_INSTALL));
     StartTarget();
@@ -1247,7 +1362,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         WORD id = LOWORD(wp);
         if (id == IDM_SYNC_NOW) {
             std::wstring text; bool err = false;
-            DoSyncOnce(true, &text, &err);
+            DoSyncOnce(false, &text, &err);
             if (!text.empty()) ShowBalloon(text, err);
         } else if (id == IDM_AUTOSTART) {
             bool installed = AutostartInstalled();
@@ -1372,12 +1487,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (wp == TIMER_ID) {
             KillTimer(hwnd, TIMER_ID);
             std::wstring text; bool err = false;
-            DoSyncOnce(true, &text, &err);
+            DoSyncOnce(false, &text, &err);
             if (!text.empty()) ShowBalloon(text, err);
         }
         else if (wp == TIMER_ID + 1) {
-            KillTimer(hwnd, TIMER_ID + 1);
+            // Щоденний тик: перевірка оновлень + чистка бекапів старших доби.
             StartUpdateCheck();
+            CleanupBackups();
+            // Переозброюємо на наступну добу (якщо це був стартовий тик).
+            SetTimer(hwnd, TIMER_ID + 1, 24ULL * 3600ULL * 1000ULL, nullptr);
         }
         return 0;
 
@@ -1405,7 +1523,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 static int RunSilentSync()
 {
     std::wstring text; bool err = false;
-    DoSyncOnce(true, &text, &err);
+    DoSyncOnce(false, &text, &err);
     // Балун у тихому режимі неможливий (трея немає) - усе в логу.
     return err ? 2 : 0;
 }

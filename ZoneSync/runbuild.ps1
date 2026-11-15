@@ -1,0 +1,1 @@
+cmd /c "cd /d D:\Work\ZoneSync && set PATH=C:\msys64\ucrt64\bin;%PATH% && windres.exe res\resources.rc -O coff -o res\resources.o && g++.exe src\zone_sync.cpp res\resources.o -o zone_sync.exe -municode -mwindows -static -s -lshell32 -luser32 -ladvapi32 -lcomdlg32 -lversion -lole32 -luuid -lurlmon && echo BUILD_OK"

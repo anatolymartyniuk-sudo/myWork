@@ -1,0 +1,4 @@
+# -*- coding: utf-8 -*-
+# Zone Sync: финальная версия файла - полная перезапись src/zone_sync.cpp
+# со всеми накопленными исправлениями. Пишется через bash (не PowerShell).
+print('placeholder')
