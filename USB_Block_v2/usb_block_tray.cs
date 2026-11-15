@@ -21,8 +21,8 @@ using Microsoft.Win32;
 // Версия программы. Та же цифра стоит и в app.manifest (assemblyIdentity):
 // при каждой сборке обновляются ОБЕ, иначе в свойствах файла и в манифесте
 // разойдутся. Проверка - в самопроверке ("Build version").
-[assembly: AssemblyVersion("2.0.10.0")]
-[assembly: AssemblyFileVersion("2.0.10.0")]
+[assembly: AssemblyVersion("2.0.21.20")]
+[assembly: AssemblyFileVersion("2.0.21.20")]
 
 namespace UsbBlockTray
 {
@@ -87,9 +87,8 @@ namespace UsbBlockTray
             }
 
             // КОНТРОЛЬ СЛУЖБЫ (--ensure-service): запускается задачей
-            // планировщика от SYSTEM раз в минуту. Если службу остановили,
-            // отключили или удалили, возвращает её в рабочее состояние
-            // (удалённую - ставит заново). Без UI.
+            // планировщика от SYSTEM раз в минуту. Если службу остановили
+            // или отключили, поднимает её обратно. Без UI.
             if (ensureService)
             {
                 ServiceManager.EnsureRunning();
@@ -264,44 +263,16 @@ namespace UsbBlockTray
                 }
             }
 
-            // Если значок трея уже запущен в этой сессии - второй экземпляр
-            // не стартуем. Проверяем по имени процесса и командной строке:
-            // то же имя exe носят служба (--service), уведомитель (--notify)
-            // и задача контроля (--ensure-service) - их за работающий трей
-            // не считаем. Ручной запуск подтверждается окном, автозапуск из
-            // задачи Планировщика (--logon) молчит.
-            if (Diag.TrayInstanceRunning())
+            bool created;
+            using (Mutex mtx = new Mutex(true, MutexName, out created))
             {
-                ReportAlreadyRunning(logon);
-                return 0;
-            }
-
-            // Мьютекс трея. Если он занят ДРУГИМ экземпляром - второй значок
-            // не создаём. Учтён и случай, когда экземпляр запущен с другими
-            // правами (например, повышенными): обычный процесс не может
-            // открыть такой мьютекс и получает UnauthorizedAccessException -
-            // это тоже "уже запущено", поэтому не падаем, а корректно
-            // завершаемся (окно - только при ручном запуске).
-            Mutex mtx = null;
-            try
-            {
-                bool created;
-                mtx = new Mutex(true, MutexName, out created);
                 if (!created)
                 {
-                    mtx.Dispose();
-                    ReportAlreadyRunning(logon);
-                    return 0;
+                    MessageBox.Show(Loc.T("Програму вже запущено (значок у треї)."),
+                        Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return 1;
                 }
-            }
-            catch (UnauthorizedAccessException)
-            {
-                ReportAlreadyRunning(logon);
-                return 0;
-            }
 
-            try
-            {
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
 
@@ -317,30 +288,7 @@ namespace UsbBlockTray
                     Application.Run(ctx);
                 }
             }
-            finally
-            {
-                if (mtx != null)
-                {
-                    try { mtx.ReleaseMutex(); } catch { }
-                    mtx.Dispose();
-                }
-            }
             return 0;
-        }
-
-        // Подсказка о повторном запуске. Ручной запуск (без --logon) видит
-        // окно "Програму вже запущено", а автозапуск из задачи Планировщика
-        // (-logon) молчит - иначе при каждом входе в систему могло бы
-        // всплывать окно, если значок уже работает.
-        private static void ReportAlreadyRunning(bool fromLogon)
-        {
-            if (fromLogon) return;
-            try
-            {
-                MessageBox.Show(Loc.T("Програму вже запущено (значок у треї)."),
-                    Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            catch { }
         }
 
         // Запускает отдельный процесс-уведомитель (--notify) в текущей
@@ -1404,6 +1352,8 @@ namespace UsbBlockTray
         public string DiskDeviceId; // \\.\PHYSICALDRIVE<n>
         public string Label;        // метка (имя) тома накопителя
         public bool Allowed;        // true - устройство в whitelist (сейчас разрешено)
+        public bool IsWpd;          // true - MTP/WPD (портативное) устройство
+        public string PnpInstanceId;
     }
 
     public sealed class BlockedDevice
@@ -1472,12 +1422,148 @@ namespace UsbBlockTray
             string o;
             Exec.Run("pnputil.exe", "/disable-device \"" + instanceId + "\"", out o);
         }
+        // Запасной путь: отключить через WMI/CIM (Win32_PnPEntity.Disable).
+        // На некоторых ОС pnputil возвращает "Access is denied", а CIM-метод
+        // отключает устройство успешно.
+        public static void DisableDeviceWmi(string instanceId)
+        {
+            if (string.IsNullOrEmpty(instanceId)) return;
+            try
+            {
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
+                    @"root\cimv2", "SELECT * FROM Win32_PnPEntity"))
+                using (ManagementObjectCollection coll = searcher.Get())
+                {
+                    foreach (ManagementObject mo in coll)
+                    {
+                        string pnp = mo["PNPDeviceID"] as string;
+                        if (string.IsNullOrEmpty(pnp)) continue;
+                        if (!string.Equals(pnp, instanceId, StringComparison.OrdinalIgnoreCase)) continue;
+                        try { mo.InvokeMethod("Disable", null); } catch { }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // Политика доступа к Portable Devices (WPD/MTP-смартфоны) через
+        // RemovableStorageDevices. Стандартный механизм Windows (7+):
+        // per-device Deny_Read/Deny_Write имеет приоритет над классовой
+        // политикой и применяется МГНОВЕННО, без перезагрузки и без
+        // переустановки драйвера. Работает на всех ОС.
+        public static void SetWpdAccessPolicy(string instanceId, bool deny)
+        {
+            if (string.IsNullOrEmpty(instanceId)) return;
+            try
+            {
+                string keyPath = "SOFTWARE\\Policies\\Microsoft\\Windows\\RemovableStorageDevices\\{53F5630B-B6BF-11D0-94F2-00A0C91EFB8B}\\DeviceIds\\" + instanceId;
+                using (Microsoft.Win32.RegistryKey k = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(keyPath))
+                {
+                    k.SetValue("Deny_Read", deny ? 1 : 0, Microsoft.Win32.RegistryValueKind.DWord);
+                    k.SetValue("Deny_Write", deny ? 1 : 0, Microsoft.Win32.RegistryValueKind.DWord);
+                }
+            }
+            catch { }
+        }
+
 
         public static void RemoveDevice(string instanceId)
         {
             string o;
             Exec.Run("pnputil.exe", "/remove-device \"" + instanceId + "\"", out o);
         }
+
+
+
+        // Остановить/запустить службу WPDBusEnum (WPD Bus Enumerator).
+        // Остановка блокирует ВСЕ WPD-устройства (смартфоны, камеры и т.д.)
+        // на уровне системы. Используется как крайний запасной путь, когда
+        // отключение конкретного устройства не работает.
+        public static void StopWpdService()
+        {
+            try
+            {
+                using (System.ServiceProcess.ServiceController sc = new System.ServiceProcess.ServiceController("WPDBusEnum"))
+                {
+                    if (sc.Status == System.ServiceProcess.ServiceControllerStatus.Running)
+                    {
+                        sc.Stop();
+                        sc.WaitForStatus(System.ServiceProcess.ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(10));
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static void StartWpdService()
+        {
+            try
+            {
+                using (System.ServiceProcess.ServiceController sc = new System.ServiceProcess.ServiceController("WPDBusEnum"))
+                {
+                    if (sc.Status == System.ServiceProcess.ServiceControllerStatus.Stopped)
+                    {
+                        sc.Start();
+                        sc.WaitForStatus(System.ServiceProcess.ServiceControllerStatus.Running, TimeSpan.FromSeconds(10));
+                    }
+                }
+            }
+            catch { }
+        }
+
+
+
+        // Запретить установку пристроев класса WPD через Device Installation
+        // Restrictions (реестр). Работает на всех Windows, но требует
+        // переподключения пристрою для вступления в силу.
+        public static void DenyDeviceClass(string classGuid)
+        {
+            if (string.IsNullOrEmpty(classGuid)) return;
+            try
+            {
+                string key = @"SOFTWARE\Policies\Microsoft\Windows\DeviceInstall\Restrictions";
+                using (Microsoft.Win32.RegistryKey k = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(key))
+                {
+                    k.SetValue("DenyDeviceClasses", 1, Microsoft.Win32.RegistryValueKind.DWord);
+                }
+                string listKey = key + "\\DenyDeviceClassesList";
+                using (Microsoft.Win32.RegistryKey k = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(listKey))
+                {
+                    // Добавить GUID в список (найти первый свободный номер)
+                    int idx = 1;
+                    while (k.GetValue(idx.ToString()) != null) idx++;
+                    k.SetValue(idx.ToString(), classGuid, Microsoft.Win32.RegistryValueKind.String);
+                }
+            }
+            catch { }
+        }
+
+        // Прямой запись ConfigFlags |= 1 в реестр Enum\USB\... + перечисление
+        // родительского хаба через CM_Reenumerate_DevNode. Не требует pnputil.
+        public static void DisableDeviceRegistry(string instanceId)
+        {
+            if (string.IsNullOrEmpty(instanceId)) return;
+            try
+            {
+                string[] parts = instanceId.Split(new char[] { '\\' }, 3);
+                if (parts.Length < 3) return;
+                string vidPid = parts[1];
+                string serial = parts[2];
+                string regPath = "SYSTEM\\CurrentControlSet\\Enum\\USB\\" + vidPid + "\\" + serial;
+                using (Microsoft.Win32.RegistryKey k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(regPath, true))
+                {
+                    if (k == null) return;
+                    object cfg = k.GetValue("ConfigFlags");
+                    int flags = 0;
+                    try { if (cfg != null) flags = Convert.ToInt32(cfg); } catch { }
+                    flags |= 1;
+                    k.SetValue("ConfigFlags", flags, Microsoft.Win32.RegistryValueKind.DWord);
+                }
+                try { PnPUtil.Scan(); } catch { }
+            }
+            catch { }
+        }
+
     }
 
     // Заблокированный (снятый с монтирования) том USB-накопителя.
@@ -1512,21 +1598,7 @@ namespace UsbBlockTray
             if (v == null || string.IsNullOrEmpty(v.DriveLetter)) return false;
             string volPath = GetVolumePath(v.DriveLetter);
             if (!string.IsNullOrEmpty(volPath))
-            {
                 Track(v.DriveLetter, volPath, v.Serial, v.UsbId);
-                // Метка нужна позже, когда буквы уже не будет (окно
-                // «Додати пристрій»): запоминаем её до снятия точки.
-                try
-                {
-                    string label;
-                    Dictionary<string, string> labels = UsbQuery.GetVolumeLabels();
-                    if (labels.TryGetValue(v.DriveLetter, out label))
-                        UsbQuery.RememberVolumeLabel(volPath, label);
-                }
-                catch
-                {
-                }
-            }
             string o;
             return Exec.Run("mountvol.exe", v.DriveLetter + ": /p", out o);
         }
@@ -1720,32 +1792,642 @@ namespace UsbBlockTray
     {
         private const string EnumBase = @"SYSTEM\CurrentControlSet\Enum";
 
-        public static List<StorageDevice> GetUsbStorages()
+public static List<StorageDevice> GetWpdPortableDevices()
         {
             List<StorageDevice> list = new List<StorageDevice>();
             try
             {
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(@"root\cimv2", "SELECT * FROM Win32_PnPEntity"))
+                using (ManagementObjectCollection coll = searcher.Get())
+                {
+                    foreach (ManagementObject mo in coll)
+                    {
+                        string pnp = mo["PNPDeviceID"] as string;
+                        string instanceId = mo["DeviceID"] as string;
+                        string service = mo["Service"] as string;
+                        string cls = mo["ClassGuid"] as string;
+                        string name = mo["Name"] as string;
+                        if (string.IsNullOrEmpty(pnp)) continue;
+                        bool isWpd = false;
+                        if (!string.IsNullOrEmpty(service) && service.IndexOf("WPDBusEnum", StringComparison.OrdinalIgnoreCase) >= 0) isWpd = true;
+                        if (!string.IsNullOrEmpty(cls) && cls.IndexOf("EEC5AD98", StringComparison.OrdinalIgnoreCase) >= 0) isWpd = true;
+                        string pnpClass = mo["PNPClass"] as string;
+                        if (!string.IsNullOrEmpty(pnpClass) && pnpClass.Equals("WPD", StringComparison.OrdinalIgnoreCase)) isWpd = true;
+                        if (!isWpd) continue;
+                        // Пропускаємо WPDBUSENUM-обгортки: це дублікати
+                        // мас-сторадж пристроїв (флешок), а не смартфони.
+                        if (pnp.StartsWith("SWD\\WPDBUSENUM\\", StringComparison.OrdinalIgnoreCase)) continue;
+                        // USB ID беремо ПРЯМО з PnpInstanceId (детерміновано):
+                        // "USB\VID_22B8&PID_2E82\SERIAL" -> "USB\VID_22B8&PID_2E82".
+                        // FindParentUsbId через Win32_USBControllerDevice ненадійний:
+                        // повертав випадкового предка (напр. VID_046D іншого
+                        // пристрою), через що телефон помилково вважався
+                        // дозволеним (збіг з whitelist записом Ventoy).
+                        string usbId = null;
+                        if (pnp.StartsWith("USB\\VID_", StringComparison.OrdinalIgnoreCase))
+                        {
+                            int slash = pnp.IndexOf('\\', 4);
+                            if (slash > 0) usbId = pnp.Substring(0, slash);
+                        }
+                        if (string.IsNullOrEmpty(usbId))
+                            usbId = FindParentUsbId(pnp);
+                        StorageDevice sd = new StorageDevice();
+                        sd.Model = string.IsNullOrEmpty(name) ? "Portable Device" : name;
+                        sd.UsbId = usbId;
+                        sd.Serial = ExtractSerial(pnp);
+                        sd.IsWpd = true;
+                        sd.PnpInstanceId = pnp;
+                        sd.InstanceId = instanceId ?? pnp;
+                        list.Add(sd);
+                    }
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        // CM_* функции экспортирует cfgmgr32.dll (не setupapi.dll).
+        [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CM_Locate_DevNodeW")]
+        private static extern int CM_Locate_DevNodeW(out IntPtr pdnDevInst, string pDeviceID, int ulFlags);
+
+        [DllImport("cfgmgr32.dll", SetLastError = true)]
+        private static extern int CM_Get_Parent(out IntPtr pdnDevInst, IntPtr dnDevInst, int ulFlags);
+
+        [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CM_Get_Device_IDW")]
+        private static extern int CM_Get_Device_IDW(IntPtr dnDevInst, StringBuilder buffer, int bufferLen, int ulFlags);
+
+        [DllImport("cfgmgr32.dll", SetLastError = true)]
+        private static extern int CM_Enable_DevNode(IntPtr dnDevInst, int ulFlags);
+
+        [DllImport("cfgmgr32.dll", SetLastError = true)]
+        private static extern int CM_Disable_DevNode(IntPtr dnDevInst, int ulFlags);
+
+        [DllImport("cfgmgr32.dll", SetLastError = true)]
+        private static extern int CM_Reenumerate_DevNode(IntPtr dnDevInst, int ulFlags);
+
+        [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CM_Request_Device_EjectW")]
+        private static extern int CM_Request_Device_Eject(IntPtr dnDevInst, out IntPtr pVetoType, StringBuilder pszVetoName, uint ulNameLength, uint ulFlags);
+
+        [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern int CM_Get_Device_ID_List_Size(out int pulLen, string pszFilter, int ulFlags);
+
+        [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern int CM_Get_Device_ID_List(string pszFilter, StringBuilder ptBuffer, int bufferLen, int ulFlags);
+
+        private const int CM_GETIDLIST_FILTER_PRESENT = 0x00000001;
+        private const int CM_GETIDLIST_FILTER_ENUMERATOR = 0x00000002;
+
+
+        // SetupAPI: отключение устройства через DIF_PROPERTYCHANGE (как Диспетчер
+        // устройств). Работает на всех Windows, включая те, где pnputil/CM
+        // возвращают "Access is denied".
+        [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr SetupDiGetClassDevs(ref Guid ClassGuid, string Enumerator, IntPtr hwndParent, uint Flags);
+
+        [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool SetupDiEnumDeviceInfo(IntPtr hDevInfo, uint MemberIndex, ref SP_DEVINFO_DATA DeviceInfoData);
+
+        [DllImport("setupapi.dll", SetLastError = true)]
+        private static extern bool SetupDiDestroyDeviceInfoList(IntPtr hDevInfo);
+
+        [DllImport("setupapi.dll", SetLastError = true)]
+        private static extern bool SetupDiSetClassInstallParams(IntPtr hDevInfo, ref SP_DEVINFO_DATA DeviceInfoData, ref SP_PROPCHANGE_PARAMS ClassInstallParams, uint ClassInstallParamsSize);
+
+        [DllImport("setupapi.dll", SetLastError = true)]
+        private static extern bool SetupDiCallClassInstaller(uint InstallFunction, IntPtr hDevInfo, ref SP_DEVINFO_DATA DeviceInfoData);
+
+        [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool SetupDiGetDeviceInstanceId(IntPtr hDevInfo, ref SP_DEVINFO_DATA DeviceInfoData, StringBuilder DeviceInstanceId, uint DeviceInstanceIdSize, out uint RequiredSize);
+
+        private const uint DIGCF_PRESENT = 0x00000002;
+        private const uint DIGCF_DEVICEINTERFACE = 0x00000010;
+        private const uint DIF_PROPERTYCHANGE = 0x00000012;
+        private const uint DICS_DISABLE = 0x00000002;
+        private const uint DICS_FLAG_GLOBAL = 0x00000001;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SP_DEVINFO_DATA
+        {
+            public uint cbSize;
+            public Guid ClassGuid;
+            public uint DevInst;
+            public IntPtr Reserved;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SP_CLASSINSTALL_HEADER
+        {
+            public uint cbSize;
+            public uint InstallFunction;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SP_PROPCHANGE_PARAMS
+        {
+            public SP_CLASSINSTALL_HEADER ClassInstallHeader;
+            public uint StateChange;
+            public uint Scope;
+            public uint HwProfile;
+        }
+
+
+        private const int CR_SUCCESS = 0;
+        private const int CM_LOCATE_DEVNODE_PHANTOM = 1;
+
+        // Возвращает DeviceID ближайшего USB-предка (USB\VID_...), если
+        // устройство физически подключено через USB. Работает и для
+        // UAS/SCSI-мостов, которые Windows показывает как SCSI/IDE.
+        private static string FindUsbAncestorDeviceId(string pnpDeviceId)
+        {
+            if (string.IsNullOrEmpty(pnpDeviceId)) return null;
+            try
+            {
+                IntPtr inst;
+                if (CM_Locate_DevNodeW(out inst, pnpDeviceId, 0) != CR_SUCCESS) return null;
+                StringBuilder sb = new StringBuilder(1024);
+                IntPtr cur = inst;
+                for (int depth = 0; depth < 16; depth++)
+                {
+                    IntPtr parent;
+                    if (CM_Get_Parent(out parent, cur, 0) != CR_SUCCESS) return null;
+                    sb.Length = 0;
+                    if (CM_Get_Device_IDW(parent, sb, sb.Capacity, 0) != CR_SUCCESS) return null;
+                    string id = sb.ToString();
+                    if (id.StartsWith("USB\\VID_", StringComparison.OrdinalIgnoreCase))
+                        return id;
+                    cur = parent;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static bool HasUsbAncestor(string pnpDeviceId)
+        {
+            return FindUsbAncestorDeviceId(pnpDeviceId) != null;
+        }
+
+
+        // Включает ранее отключённое (наше) PnP-устройство, даже если оно уже
+        // отсутствует в списке присутствующих (disabled/phantom). Сначала
+        // пробуем cfgmgr32, затем pnputil как запасной путь.
+        public static void EnablePnpDevice(string pnpDeviceId)
+        {
+            if (string.IsNullOrEmpty(pnpDeviceId)) return;
+            try
+            {
+                IntPtr inst;
+                if (CM_Locate_DevNodeW(out inst, pnpDeviceId, CM_LOCATE_DEVNODE_PHANTOM) == CR_SUCCESS)
+                {
+                    CM_Enable_DevNode(inst, 0);
+                    // Перерахувати вузол і батьківський хаб, щоб phantom-вузол
+                    // зник і пристрій знову з'явився у списку присутніх.
+                    CM_Reenumerate_DevNode(inst, 0);
+                    IntPtr parent;
+                    if (CM_Get_Parent(out parent, inst, 0) == CR_SUCCESS && parent != IntPtr.Zero)
+                        CM_Reenumerate_DevNode(parent, 0);
+                }
+            }
+            catch { }
+            try { PnPUtil.EnableDevice(pnpDeviceId); } catch { }
+            try { PnPUtil.Scan(); } catch { }
+        }
+
+
+        // Отключает PnP-устройство (даже если оно уже phantom). Сначала
+        // cfgmgr32 (CM_Locate_DevNode с PHANTOM-флагом + CM_Disable_DevNode),
+        // затем pnputil как запасной путь.
+        public static void DisablePnpDevice(string pnpDeviceId)
+        {
+            if (string.IsNullOrEmpty(pnpDeviceId)) return;
+            try
+            {
+                IntPtr inst;
+                if (CM_Locate_DevNodeW(out inst, pnpDeviceId, CM_LOCATE_DEVNODE_PHANTOM) == CR_SUCCESS)
+                {
+                    int cmr = CM_Disable_DevNode(inst, 0);
+                    try { System.Diagnostics.EventLog.WriteEntry("UsbBlockMonitor", "DisablePnpDevice CM_Disable_DevNode=" + cmr + " for " + pnpDeviceId, System.Diagnostics.EventLogEntryType.Information); } catch { }
+                    CM_Reenumerate_DevNode(inst, 0);
+                    IntPtr parent;
+                    if (CM_Get_Parent(out parent, inst, 0) == CR_SUCCESS && parent != IntPtr.Zero)
+                        CM_Reenumerate_DevNode(parent, 0);
+                }
+            }
+            catch { }
+            try { PnPUtil.DisableDevice(pnpDeviceId); } catch { }
+            try { PnPUtil.DisableDeviceWmi(pnpDeviceId); } catch { }
+            try { PnPUtil.DisableDeviceRegistry(pnpDeviceId); } catch { }
+            try { DisableDeviceSetupApi(pnpDeviceId); } catch { }
+            // ВАЖЛИВО: НЕ видаляємо пристрій (PnPUtil.RemoveDevice) і не
+            // забороняємо весь клас WPD (DenyDeviceClass). Видалення стирало
+            // Enum-ключ (разом з ім'ям пристрою) і робило його "відсутнім",
+            // через що він зникав зі списку "Додати пристрій". Блокування
+            // доступу забезпечує політика RemovableStorageDevices
+            // (SetWpdAccessPolicy), що викликається окремо.
+        }
+
+        // Чи записаний пристрій у нашому постійному списку відключених.
+        public static bool HasDisabledWpdRecord(string pnpDeviceId)
+        {
+            if (string.IsNullOrEmpty(pnpDeviceId)) return false;
+            try
+            {
+                using (RegistryKey dw = Registry.LocalMachine.OpenSubKey(DisabledWpdKey, false))
+                {
+                    return dw != null && dw.GetValue(pnpDeviceId) != null;
+                }
+            }
+            catch { return false; }
+        }
+
+
+        // Отключение устройства через SetupAPI (DIF_PROPERTYCHANGE + DICS_DISABLE).
+        // Это тот же API, что использует Диспетчер устройств. Работает на всех
+        // Windows, включая те, где pnputil/CM/WMI возвращают "Access is denied".
+        public static void DisableDeviceSetupApi(string pnpDeviceId)
+        {
+            if (string.IsNullOrEmpty(pnpDeviceId)) return;
+            try
+            {
+                Guid wpdGuid = new Guid("6ac27878-a6fa-4155-ba85-f98f491d4f33");
+                IntPtr hDev = SetupDiGetClassDevs(ref wpdGuid, null, IntPtr.Zero,
+                    DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+                if (hDev == IntPtr.Zero || hDev.ToInt64() == -1) return;
+                try
+                {
+                    SP_DEVINFO_DATA devInfo = new SP_DEVINFO_DATA();
+                    devInfo.cbSize = (uint)Marshal.SizeOf(typeof(SP_DEVINFO_DATA));
+                    uint idx = 0;
+                    while (SetupDiEnumDeviceInfo(hDev, idx, ref devInfo))
+                    {
+                        StringBuilder sb = new StringBuilder(1024);
+                        uint req = 0;
+                        if (SetupDiGetDeviceInstanceId(hDev, ref devInfo, sb, 1024, out req))
+                        {
+                            if (string.Equals(sb.ToString(), pnpDeviceId, StringComparison.OrdinalIgnoreCase))
+                            {
+                                SP_PROPCHANGE_PARAMS params_ = new SP_PROPCHANGE_PARAMS();
+                                params_.ClassInstallHeader.cbSize = (uint)Marshal.SizeOf(typeof(SP_CLASSINSTALL_HEADER));
+                                params_.ClassInstallHeader.InstallFunction = DIF_PROPERTYCHANGE;
+                                params_.StateChange = DICS_DISABLE;
+                                params_.Scope = DICS_FLAG_GLOBAL;
+                                params_.HwProfile = 0;
+                                if (SetupDiSetClassInstallParams(hDev, ref devInfo, ref params_, (uint)Marshal.SizeOf(typeof(SP_PROPCHANGE_PARAMS))))
+                                {
+                                    SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, hDev, ref devInfo);
+                                }
+                                break;
+                            }
+                        }
+                        idx++;
+                    }
+                }
+                finally
+                {
+                    SetupDiDestroyDeviceInfoList(hDev);
+                }
+            }
+            catch { }
+        }
+
+        public static void RequestDeviceEject(string pnpDeviceId)
+        {
+            if (string.IsNullOrEmpty(pnpDeviceId)) return;
+            try
+            {
+                IntPtr inst;
+                if (CM_Locate_DevNodeW(out inst, pnpDeviceId, CM_LOCATE_DEVNODE_PHANTOM) == CR_SUCCESS)
+                {
+                    IntPtr vetoType;
+                    StringBuilder vetoName = new StringBuilder(256);
+                    CM_Request_Device_Eject(inst, out vetoType, vetoName, 256, 0);
+                }
+            }
+            catch { }
+            try { PnPUtil.Scan(); } catch { }
+        }
+
+
+        // WPD/MTP-устройства, которые МЫ отключили (ConfigFlags = 1), но
+        // которых уже нет среди присутствующих. Нужны для окна «Додати
+        // пристрій», иначе заблокированный телефон туда не попадает.
+        // Постійний список WPD-пристроїв, відключених НАМИ. CM_Disable_DevNode
+        // не встановлює ConfigFlags, тому після відключення пристрій неможливо
+        // відрізнити від просто відсутнього. Список дозволяє показувати його
+        // у "Додати пристрій" і повертати при додаванні в whitelist.
+        private const string DisabledWpdKey = @"SOFTWARE\USB_Block\DisabledWpd";
+
+        public static void AddDisabledWpdRecord(string pnpDeviceId, string model)
+        {
+            if (string.IsNullOrEmpty(pnpDeviceId)) return;
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.CreateSubKey(DisabledWpdKey))
+                {
+                    k.SetValue(pnpDeviceId, model ?? string.Empty, RegistryValueKind.String);
+                }
+            }
+            catch { }
+        }
+
+        public static void RemoveDisabledWpdRecord(string pnpDeviceId)
+        {
+            if (string.IsNullOrEmpty(pnpDeviceId)) return;
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(DisabledWpdKey, true))
+                {
+                    if (k != null) k.DeleteValue(pnpDeviceId, false);
+                }
+            }
+            catch { }
+        }
+
+        // Множина PNP-ідентифікаторів, ПРИСУТНІХ на шині зараз.
+        // CM_Get_Device_ID_LIST з фільтром PRESENT - найнадійніший спосіб
+        // визначити, чи пристрій фізично підключений (включно з disabled).
+        public static HashSet<string> GetPresentUsbDeviceIds()
+        {
+            HashSet<string> set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                int len = 0;
+                string filter = "USB";
+                if (CM_Get_Device_ID_List_Size(out len, filter,
+                        CM_GETIDLIST_FILTER_ENUMERATOR | CM_GETIDLIST_FILTER_PRESENT) != CR_SUCCESS)
+                    return set;
+                if (len <= 0) return set;
+                StringBuilder sb = new StringBuilder(len);
+                if (CM_Get_Device_ID_List(filter, sb, len,
+                        CM_GETIDLIST_FILTER_ENUMERATOR | CM_GETIDLIST_FILTER_PRESENT) != CR_SUCCESS)
+                    return set;
+                string[] ids = sb.ToString().Split(new char[] { '\0' }, StringSplitOptions.RemoveEmptyEntries);
+                foreach (string id in ids)
+                    if (!string.IsNullOrEmpty(id)) set.Add(id);
+            }
+            catch { }
+            return set;
+        }
+
+
+        public static List<StorageDevice> GetDisabledWpdDevices()
+        {
+            List<StorageDevice> list = new List<StorageDevice>();
+            try
+            {
+                // Показуємо ЛИШЕ пристрої, присутні на шині зараз: запис з
+                // ConfigFlags=1 залишається у реєстрі й після від'єднання.
+                HashSet<string> present = GetPresentUsbDeviceIds();
+                using (RegistryKey usb = Registry.LocalMachine.OpenSubKey(EnumBase + @"\USB"))
+                {
+                    if (usb == null) return list;
+                    foreach (string vidKey in usb.GetSubKeyNames())
+                    {
+                        if (!vidKey.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)) continue;
+                        using (RegistryKey vk = usb.OpenSubKey(vidKey))
+                        {
+                            if (vk == null) continue;
+                            foreach (string inst in vk.GetSubKeyNames())
+                            {
+                                using (RegistryKey ik = vk.OpenSubKey(inst))
+                                {
+                                    if (ik == null) continue;
+                                    object cfg = ik.GetValue("ConfigFlags");
+                                    int flags = 0;
+                                    try { if (cfg != null) flags = Convert.ToInt32(cfg, CultureInfo.InvariantCulture); }
+                                    catch { }
+                                    if ((flags & 1) == 0) continue; // не отключено
+                                    string guid = ik.GetValue("ClassGUID") as string;
+                                    if (string.IsNullOrEmpty(guid) ||
+                                        guid.IndexOf("EEC5AD98", StringComparison.OrdinalIgnoreCase) < 0)
+                                        continue; // не класс WPD
+
+                                    string pnp = "USB\\" + vidKey + "\\" + inst;
+                                    if (!present.Contains(pnp)) continue; // зараз не підключений
+
+                                    string desc = ik.GetValue("DeviceDesc") as string ?? "Portable Device";
+                                    int semi = desc.IndexOf(';');
+                                    if (semi >= 0) desc = desc.Substring(semi + 1);
+
+                                    StorageDevice sd = new StorageDevice();
+                                    sd.PnpInstanceId = pnp;
+                                    sd.InstanceId = sd.PnpInstanceId;
+                                    sd.Model = desc;
+                                    sd.Serial = inst;
+                                    sd.UsbId = NormalizeVidPid("USB\\" + vidKey);
+                                    sd.IsWpd = true;
+                                    sd.Label = "заблоковано";
+                                    list.Add(sd);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Друге джерело: пристрої з нашого постійного списку
+                // відключених (CM_Disable_DevNode не ставить ConfigFlags).
+                // Показуємо ЛИШЕ ті, що ПРИСУТНІ на шині зараз: пристрій,
+                // який вимкнений і лежить у шухляді, додавати ні до чого.
+                HashSet<string> known = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (StorageDevice sd0 in list)
+                    known.Add(sd0.PnpInstanceId ?? string.Empty);
+                using (RegistryKey dw = Registry.LocalMachine.OpenSubKey(DisabledWpdKey))
+                {
+                    if (dw != null)
+                    {
+                        foreach (string pnp in dw.GetValueNames())
+                        {
+                            if (string.IsNullOrEmpty(pnp)) continue;
+                            if (known.Contains(pnp)) continue;
+                            // Тільки присутні зараз
+                            if (!present.Contains(pnp)) continue;
+                            string[] parts = pnp.Split(new char[] { '\\' });
+                            if (parts.Length < 3 || !parts[0].Equals("USB", StringComparison.OrdinalIgnoreCase)) continue;
+                            if (!parts[1].StartsWith("VID_", StringComparison.OrdinalIgnoreCase)) continue;
+
+                            // Ім'я: спочатку з реєстру пристрою, потім збережене
+                            // під час блокування (Enum-ключ міг бути видалений
+                            // через PnPUtil.RemoveDevice).
+                            string stored = dw.GetValue(pnp) as string;
+
+                            string desc = null;
+                            using (RegistryKey ik = Registry.LocalMachine.OpenSubKey(EnumBase + "\\" + pnp))
+                            {
+                                if (ik != null) desc = ik.GetValue("DeviceDesc") as string;
+                            }
+                            if (string.IsNullOrEmpty(desc) && !string.IsNullOrEmpty(stored))
+                                desc = stored;
+                            if (!string.IsNullOrEmpty(desc))
+                            {
+                                int semi = desc.LastIndexOf(';');
+                                if (semi >= 0) desc = desc.Substring(semi + 1);
+                            }
+
+                            StorageDevice sd = new StorageDevice();
+                            sd.PnpInstanceId = pnp;
+                            sd.InstanceId = pnp;
+                            sd.Model = string.IsNullOrEmpty(desc) ? "Portable Device" : desc;
+                            sd.Serial = parts[2];
+                            sd.UsbId = parts[0] + "\\" + parts[1];
+                            sd.IsWpd = true;
+                            sd.Label = "заблоковано";
+                            list.Add(sd);
+                        }
+                    }
+                }
+
+            }
+            catch { }
+            return list;
+        }
+
+
+        private static string FindParentUsbId(string pnpDeviceId)
+        {
+            if (string.IsNullOrEmpty(pnpDeviceId)) return null;
+            try
+            {
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(@"root\cimv2", "SELECT * FROM Win32_USBControllerDevice"))
+                using (ManagementObjectCollection coll = searcher.Get())
+                {
+                    foreach (ManagementObject mo in coll)
+                    {
+                        string dependent = mo["Dependent"] as string;
+                        string antecedent = mo["Antecedent"] as string;
+                        if (string.IsNullOrEmpty(dependent) || string.IsNullOrEmpty(antecedent)) continue;
+                        if (dependent.IndexOf(pnpDeviceId, StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            int p = antecedent.IndexOf(@"USB\VID_", StringComparison.OrdinalIgnoreCase);
+                            if (p >= 0)
+                            {
+                                string rest = antecedent.Substring(p);
+                                int q = rest.IndexOf('"');
+                                if (q >= 0) rest = rest.Substring(0, q);
+                                return NormalizeVidPid(rest);
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+            try
+            {
+                using (RegistryKey usb = Registry.LocalMachine.OpenSubKey(EnumBase + @"\USB"))
+                {
+                    if (usb != null)
+                    {
+                        foreach (string vidKey in usb.GetSubKeyNames())
+                        {
+                            if (!vidKey.StartsWith("VID_", StringComparison.OrdinalIgnoreCase)) continue;
+                            return NormalizeVidPid("USB\\" + vidKey);
+                        }
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        public static string GetVolumeLabelByPath(string volumePath)
+        {
+            if (string.IsNullOrEmpty(volumePath)) return null;
+            string cached = CachedVolumeLabel(volumePath);
+            if (cached != null) return cached;
+            try
+            {
+                string want = volumePath.TrimEnd('\\');
                 using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
-                    "root\\cimv2", "SELECT * FROM Win32_DiskDrive WHERE InterfaceType='USB'"))
+                    "root\\cimv2", "SELECT DeviceID, Label FROM Win32_Volume"))
+                using (ManagementObjectCollection coll = searcher.Get())
+                {
+                    foreach (ManagementObject mo in coll)
+                    {
+                        string dev = mo["DeviceID"] as string;
+                        if (string.IsNullOrEmpty(dev)) continue;
+                        if (!string.Equals(dev.TrimEnd('\\'), want,
+                            StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        return ((mo["Label"] as string) ?? string.Empty).Trim();
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return null;
+        }
+
+
+
+        public static string CachedVolumeLabel(string volumePath)
+        {
+            if (string.IsNullOrEmpty(volumePath)) return null;
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(LabelCacheKey, false))
+                {
+                    if (k == null) return null;
+                    return k.GetValue(volumePath.TrimEnd('\\')) as string;
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private const string LabelCacheKey = @"SOFTWARE\USB_Block\VolumeLabels";
+
+                                                                public static List<StorageDevice> GetUsbStorages()
+        {
+            List<StorageDevice> list = new List<StorageDevice>();
+            try
+            {
+                // ВАЖНО: не только InterfaceType='USB'. Внешние накопители через
+                // USB-мосты UAS/SCSI (например Initio/Ventoy) видны как SCSI/IDE,
+                // но подключены по USB - их тоже нужно блокировать/учитывать.
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
+                    "root\\cimv2", "SELECT DeviceID,PNPDeviceID,Model,InterfaceType,MediaType FROM Win32_DiskDrive"))
                 using (ManagementObjectCollection coll = searcher.Get())
                 {
                     foreach (ManagementObject mo in coll)
                     {
                         string dev = (string)mo["PNPDeviceID"];
                         string model = (string)mo["Model"];
-                        if (string.IsNullOrEmpty(dev) ||
-                            !dev.StartsWith("USBSTOR\\", StringComparison.OrdinalIgnoreCase))
-                        {
-                            continue;
-                        }
+                        string iface = (string)mo["InterfaceType"];
+                        string media = (string)mo["MediaType"];
+                        if (string.IsNullOrEmpty(dev)) continue;
+
+                        bool usb = string.Equals(iface, "USB", StringComparison.OrdinalIgnoreCase);
+                        bool usbstor = dev.StartsWith("USBSTOR\\", StringComparison.OrdinalIgnoreCase);
+                        // Для не-USBSTOR диска (UAS/SCSI-мост) идём вверх по
+                        // PnP-дереву: если в предках есть USB\VID_... - это
+                        // внешний USB-накопитель, даже если Windows показывает
+                        // его как SCSI/IDE. Внутренние SATA/NVMe предка USB не
+                        // имеют и сюда не попадут.
+                        string usbAncestorId = (!usb && !usbstor)
+                            ? FindUsbAncestorDeviceId(dev) : null;
+                        bool usbAncestor = usbAncestorId != null;
+
+                        if (!(usb || usbstor || usbAncestor)) continue;
+                        // Не фильтруем строго по USBSTOR: у SCSI-мостов PNPDeviceID вида SCSI\DISK...
+                        // но устройство относится к USB-контроллеру.
 
                         StorageDevice sd = new StorageDevice();
                         sd.InstanceId = dev;
                         sd.Model = model == null ? string.Empty : model.Trim();
                         sd.Serial = ExtractSerial(dev);
+                        if (string.IsNullOrEmpty(sd.Serial))
+                        {
+                            int b1 = dev.LastIndexOf('\\');
+                            if (b1 > 0) sd.Serial = dev.Substring(b1 + 1);
+                        }
                         sd.HardwareIds = GetHardwareIds(dev);
-                        sd.BestDiskId = PickConcreteHwId(sd.HardwareIds);
-                        sd.UsbId = FindUsbIdBySerial(sd.Serial);
+                        sd.BestDiskId = PickConcreteHwId(sd.HardwareIds) ?? dev;
+                        sd.UsbId = usbstor ? FindUsbIdBySerial(sd.Serial) : FindParentUsbId(dev);
+                        if (string.IsNullOrEmpty(sd.UsbId) && !string.IsNullOrEmpty(usbAncestorId))
+                            sd.UsbId = NormalizeVidPid(usbAncestorId);
+                        if (string.IsNullOrEmpty(sd.UsbId))
+                            sd.UsbId = ExtractVidPid(dev);
                         sd.DiskDeviceId = mo["DeviceID"] as string ?? string.Empty;
 
                         list.Add(sd);
@@ -1877,76 +2559,6 @@ namespace UsbBlockTray
             {
             }
             return map;
-        }
-
-        private const string LabelCacheKey = @"SOFTWARE\USB_Block\VolumeLabels";
-
-        // Метка тома, снятого с монтирования (путь тома -> метка). У
-        // заблокированного накопителя уже нет буквы, Win32_LogicalDisk его
-        // не показывает; кэш заполняется в момент снятия буквы.
-        public static string CachedVolumeLabel(string volumePath)
-        {
-            if (string.IsNullOrEmpty(volumePath)) return null;
-            try
-            {
-                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(LabelCacheKey, false))
-                {
-                    if (k == null) return null;
-                    return k.GetValue(volumePath.TrimEnd('\\')) as string;
-                }
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        public static void RememberVolumeLabel(string volumePath, string label)
-        {
-            if (string.IsNullOrEmpty(volumePath)) return;
-            try
-            {
-                using (RegistryKey k = Registry.LocalMachine.CreateSubKey(LabelCacheKey))
-                {
-                    if (k == null) return;
-                    k.SetValue(volumePath.TrimEnd('\\'), label ?? string.Empty,
-                        RegistryValueKind.String);
-                }
-            }
-            catch
-            {
-            }
-        }
-
-        // Метка тома по пути \\?\Volume{GUID}\ - даже если у тома нет буквы
-        // (заблокированный накопитель): Win32_Volume читает метку из ФС.
-        public static string GetVolumeLabelByPath(string volumePath)
-        {
-            if (string.IsNullOrEmpty(volumePath)) return null;
-            string cached = CachedVolumeLabel(volumePath);
-            if (cached != null) return cached;
-            try
-            {
-                string want = volumePath.TrimEnd('\\');
-                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
-                    "root\\cimv2", "SELECT DeviceID, Label FROM Win32_Volume"))
-                using (ManagementObjectCollection coll = searcher.Get())
-                {
-                    foreach (ManagementObject mo in coll)
-                    {
-                        string dev = mo["DeviceID"] as string;
-                        if (string.IsNullOrEmpty(dev)) continue;
-                        if (!string.Equals(dev.TrimEnd('\\'), want,
-                            StringComparison.OrdinalIgnoreCase))
-                            continue;
-                        return ((mo["Label"] as string) ?? string.Empty).Trim();
-                    }
-                }
-            }
-            catch
-            {
-            }
-            return null;
         }
 
         private static List<UsbVolume> GetVolumes(bool usbOnly)
@@ -2443,12 +3055,13 @@ namespace UsbBlockTray
         private const string EventsKey = @"SOFTWARE\USB_Block\Events";
         private const int MaxEvents = 32;
         // Окно дедупликации: то же устройство, заблокированное в этом окне,
-        // повторно НЕ уведомляется. Нужно ТОЛЬКО чтобы служба (2 с) и трей
-        // (3 с), отреагировавшие на одно и то же блокирование, не задвоили
-        // сообщение. Вторая копия может увидеть том лишь пока первая не сняла
-        // букву (доли секунды), поэтому окно 3 с с запасом перекрывает дубль,
-        // но НЕ гасит повторное подключение накопителя (оно физически дольше).
-        private static readonly TimeSpan DedupWindow = TimeSpan.FromSeconds(3);
+        // повторно НЕ уведомляется. Два сценария:
+        // 1) служба (2 с) и трей (3 с) реагируют на одно блокирование;
+        // 2) Android ПОСЛЕ отключения перемикает режим USB (PID 2E82 <-> 2E83)
+        //    каждые ~5-6 с - каждый цикл выглядит как новое блокирование того
+        //    же устройства. Окно 60 с перекрывает оба сценария: физическое
+        //    переподключение телефона в течение минуты даёт одно уведомление.
+        private static readonly TimeSpan DedupWindow = TimeSpan.FromSeconds(60);
 
         public sealed class BlockEvent
         {
@@ -2651,6 +3264,14 @@ namespace UsbBlockTray
             lock (Sync) return new List<DeviceEntry>(_cache);
         }
 
+        // Часовий штамп поточного whitelist (для швидких перевірок без
+        // копіювання списку: змінився штамп - список перечитано).
+        public static DateTime CacheStamp()
+        {
+            EnsureCache();
+            lock (Sync) return _cacheStamp;
+        }
+
         public static void Refresh()
         {
             lock (Sync)
@@ -2733,6 +3354,91 @@ namespace UsbBlockTray
                 // снятий) - уведомляем о них один раз за их присутствие,
                 // иначе блокировка есть, а сообщения о ней нет.
                 AddLetterlessUnallowed(newly, wl, disks);
+                // MTP/WPD (без буквы диска): отключаем PnP-устройство, уведомление раз на присутствие.
+                try
+                {
+                    HashSet<string> reportedWpd = LoadReportedSet(ReportedWpdKey);
+                    bool wpdChanged = false;
+                    HashSet<string> presentWpd = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    List<StorageDevice> wpdList = UsbQuery.GetWpdPortableDevices();
+                    foreach (StorageDevice ws in wpdList)
+                    {
+                        if (string.IsNullOrEmpty(ws.PnpInstanceId) && string.IsNullOrEmpty(ws.Serial) && string.IsNullOrEmpty(ws.UsbId)) continue;
+                        // Ключ дедуплікації сповіщень - ЗА СЕРІЙНИМ НОМЕРОМ
+                        // (фізичний пристрій): Android після відключення
+                        // перемикає режим USB (2E82 <-> 2E83), екземпляр PnP
+                        // змінюється, а серійник - ні. Дедуплікація за PNP
+                        // давала б нове сповіщення на кожне перемикання режиму.
+                        string wkey = !string.IsNullOrEmpty(ws.Serial)
+                            ? "SN:" + WhitelistRules.NormSerial(ws.Serial)
+                            : (!string.IsNullOrEmpty(ws.PnpInstanceId) ? "PNP:" + ws.PnpInstanceId : "USB:" + (ws.UsbId ?? string.Empty));
+                        presentWpd.Add(wkey);
+                        bool allowed = false;
+                        foreach (DeviceEntry e in wl)
+                        {
+                            // Серійний номер - головний ознака: якщо він відомий
+                            // у обох сторін і РІЗНИЙ - це інший пристрій, навіть
+                            // якщо VID&PID збігаються (два однакові телефони).
+                            if (UsbJournalMonitor.EntryMatches(e, ws.UsbId, ws.Serial)) { allowed = true; break; }
+                            if (!string.IsNullOrEmpty(ws.PnpInstanceId) && !string.IsNullOrEmpty(e.Serial) &&
+                                string.Equals(ws.PnpInstanceId, e.Serial, StringComparison.OrdinalIgnoreCase)) { allowed = true; break; }
+                        }
+                        if (allowed)
+                        {
+                            if (!string.IsNullOrEmpty(ws.PnpInstanceId)) { try { PnPUtil.EnableDevice(ws.PnpInstanceId); } catch { } }
+                            if (!string.IsNullOrEmpty(ws.PnpInstanceId)) { try { PnPUtil.SetWpdAccessPolicy(ws.PnpInstanceId, false); } catch { } }
+                            if (!string.IsNullOrEmpty(ws.PnpInstanceId)) { try { UsbQuery.RemoveDisabledWpdRecord(ws.PnpInstanceId); } catch { } }
+                            if (reportedWpd.Remove(wkey)) wpdChanged = true;
+                        }
+                        else
+                        {
+                            // Головний механізм блокування MTP: політика
+                            // RemovableStorageDevices (Deny_Read/Deny_Write) -
+                            // дешевий запис у реєстр, виконується щоскану.
+                            if (!string.IsNullOrEmpty(ws.PnpInstanceId)) { try { PnPUtil.SetWpdAccessPolicy(ws.PnpInstanceId, true); } catch { } }
+                            // Важкий ланцюг відключення (pnputil/WMI/SetupAPI) -
+                            // ЛИШЕ ОДИН РАЗ на пристрій: решта сканів мають
+                            // миттєво повертатись, інакше UI-потік трея висне.
+                            if (!string.IsNullOrEmpty(ws.PnpInstanceId) && !UsbQuery.HasDisabledWpdRecord(ws.PnpInstanceId))
+                            {
+                                try { UsbQuery.AddDisabledWpdRecord(ws.PnpInstanceId, ws.Model); } catch { }
+                                try { UsbQuery.DisablePnpDevice(ws.PnpInstanceId); } catch { }
+                            }
+                            if (!reportedWpd.Contains(wkey))
+                            {
+                                reportedWpd.Add(wkey); wpdChanged = true;
+                                newly.Add(new BlockedDevice { Label = string.IsNullOrEmpty(ws.Model) ? (ws.UsbId ?? ws.PnpInstanceId ?? "WPD") : ws.Model, Serial = ws.Serial ?? ws.PnpInstanceId });
+                            }
+                            _wpdGoneSince.Remove(wkey);
+                        }
+                    }
+                    // Ключі пристроїв, що зникли, видаляються НЕ одразу, а через
+                    // grace-період 60 с: Android після відключення миттєво
+                    // перепідключається (renegotiation), і без цього кожен цикл
+                    // давав би нове сповіщення - стек вікон ріс безкінечно.
+                    foreach (string rk in new List<string>(reportedWpd))
+                    {
+                        if (presentWpd.Contains(rk))
+                        {
+                            _wpdGoneSince.Remove(rk);
+                            continue;
+                        }
+                        DateTime gone;
+                        if (!_wpdGoneSince.TryGetValue(rk, out gone))
+                        {
+                            _wpdGoneSince[rk] = DateTime.UtcNow;
+                            continue;
+                        }
+                        if ((DateTime.UtcNow - gone).TotalSeconds > 60.0)
+                        {
+                            reportedWpd.Remove(rk);
+                            _wpdGoneSince.Remove(rk);
+                            wpdChanged = true;
+                        }
+                    }
+                    if (wpdChanged) SaveReportedSet(ReportedWpdKey, reportedWpd);
+                }
+                catch { }
             }
 
             return newly;
@@ -2744,6 +3450,51 @@ namespace UsbBlockTray
         // трей не должен повторно писать событие о уже присутствующем диске.
         // Каждое НОВОЕ физическое подключение снова даёт своё уведомление
         // (маркер удаляется, как только диск исчез из системы).
+        private const string ReportedWpdKey = @"SOFTWARE\USB_Block\ReportedWpd";
+
+        // Час зникнення WPD-пристроїв (grace-період сповіщень).
+        // В пам'яті процесу: служба і трей мають свої копії, це не критично.
+        private static readonly Dictionary<string, DateTime> _wpdGoneSince =
+            new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
+        private static HashSet<string> LoadReportedSet(string keyPath)
+        {
+            HashSet<string> set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(keyPath, false))
+                {
+                    if (k == null) return set;
+                    string[] arr = k.GetValue("Keys") as string[];
+                    if (arr != null)
+                        foreach (string item in arr)
+                            if (!string.IsNullOrEmpty(item)) set.Add(item);
+                }
+            }
+            catch { }
+            return set;
+        }
+
+        private static void SaveReportedSet(string keyPath, HashSet<string> set)
+        {
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.CreateSubKey(keyPath))
+                {
+                    if (set == null || set.Count == 0)
+                        k.DeleteValue("Keys", false);
+                    else
+                    {
+                        string[] arr = new string[set.Count];
+                        set.CopyTo(arr);
+                        k.SetValue("Keys", arr, RegistryValueKind.MultiString);
+                    }
+                }
+            }
+            catch { }
+        }
+
+
         private const string LetterlessKey = @"SOFTWARE\USB_Block\ReportedLetterless";
 
         private static HashSet<string> LoadReportedLetterless()
@@ -2809,22 +3560,7 @@ namespace UsbBlockTray
         private static bool IsDiskAllowed(StorageDevice d, List<DeviceEntry> wl)
         {
             if (wl == null || d == null) return false;
-            foreach (DeviceEntry e in wl)
-            {
-                if (!string.IsNullOrEmpty(e.UsbId) &&
-                    !string.Equals(e.UsbId, d.UsbId ?? "", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-                if (!string.IsNullOrEmpty(e.Serial) &&
-                    !string.IsNullOrEmpty(d.Serial) &&
-                    !string.Equals(e.Serial, d.Serial, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-                return true;
-            }
-            return false;
+            return UsbJournalMonitor.IsAllowed(d, wl);
         }
 
         private static void AddLetterlessUnallowed(
@@ -2867,18 +3603,7 @@ namespace UsbBlockTray
             if (wl == null || v == null) return false;
             foreach (DeviceEntry e in wl)
             {
-                if (!string.IsNullOrEmpty(e.UsbId) &&
-                    !string.Equals(e.UsbId, v.UsbId ?? "", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-                if (!string.IsNullOrEmpty(e.Serial) &&
-                    !string.IsNullOrEmpty(v.Serial) &&
-                    !string.Equals(e.Serial, v.Serial, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-                return true;
+                if (UsbJournalMonitor.EntryMatches(e, v.UsbId, v.Serial)) return true;
             }
             return false;
         }
@@ -3020,6 +3745,15 @@ namespace UsbBlockTray
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool CloseHandle(IntPtr hObject);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+        private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+        private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
 
         // Запись журнала: время, вид операции и подробности.
         public const string KindDeviceAdded = "DEV+";   // накопитель подключён
@@ -4327,26 +5061,39 @@ namespace UsbBlockTray
             return sb.ToString();
         }
 
-        private static bool IsAllowed(StorageDevice d, List<DeviceEntry> wl)
+        public static bool IsAllowed(StorageDevice d, List<DeviceEntry> wl)
         {
             if (wl == null || d == null) return false;
             foreach (DeviceEntry e in wl)
             {
-                if (!string.IsNullOrEmpty(e.UsbId) &&
-                    !string.Equals(e.UsbId, d.UsbId ?? "", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-                if (!string.IsNullOrEmpty(e.Serial) &&
-                    !string.IsNullOrEmpty(d.Serial) &&
-                    !string.Equals(e.Serial, d.Serial, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-                return true;
+                if (EntryMatches(e, d.UsbId, d.Serial)) return true;
             }
             return false;
         }
+
+        // Правило: серийный номер - главный признак. Если он известен у обеих
+        // сторон, сравниваем только его (VID&PID у MTP-телефонов может
+        // меняться после переподключения, например 22B8:2E82 -> 18D1:4EE8).
+        // Если серийника нет хотя бы у одной стороны - сравниваем USB ID.
+        // Возвращает false, если у обеих сторон есть разные серийники:
+        // это другое устройство, даже если модель USB совпадает.
+        public static bool EntryMatches(DeviceEntry e, string usbId, string serial)
+        {
+            if (e == null) return false;
+            string es = WhitelistRules.NormSerial(e.Serial);
+            string ds = WhitelistRules.NormSerial(serial);
+            if (es.Length > 0 && ds.Length > 0)
+                return string.Equals(es, ds, StringComparison.OrdinalIgnoreCase);
+            if (!string.IsNullOrEmpty(e.UsbId) &&
+                string.Equals(e.UsbId, usbId ?? "", StringComparison.OrdinalIgnoreCase))
+                return true;
+            return false;
+        }
+
+        // Буква диска, если диск смонтирован (по совпадению PHYSICALDRIVE).
+        // Внутри цикла берётся из кэша: сопоставление дисков и томов уже
+        // сделано один раз при сборе данных цикла.
+
 
         // Буква диска, если диск смонтирован (по совпадению PHYSICALDRIVE).
         // Внутри цикла берётся из кэша: сопоставление дисков и томов уже
@@ -5231,8 +5978,8 @@ foreach (string path in oldFiles.Keys)
             _value = current;
 
             this.Text = Loc.T("Комбінація клавіш для журналу");
-            Ui.ApplyIcon(this);
-            this.FormBorderStyle = FormBorderStyle.FixedDialog;
+
+            Ui.ApplyIcon(this);            this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
             this.MinimizeBox = false;
             this.StartPosition = FormStartPosition.CenterParent;
@@ -5407,6 +6154,716 @@ foreach (string path in oldFiles.Keys)
     // stop_usb.jpg из трейлера в конце exe ([jpg][длина][USBICON]). Если и
     // её нет - рисуется простая иконка кодом.
     // =====================================================================
+    internal static class Ui
+    {
+        private static Icon _appIcon;
+
+        // Значок приложения из встроенного ресурса (тот же, что у трея).
+        public static Icon AppIcon
+        {
+            get
+            {
+                if (_appIcon != null) return _appIcon;
+                try
+                {
+                    using (Stream s = Assembly.GetExecutingAssembly()
+                        .GetManifestResourceStream("usb_block.tray.ico"))
+                    {
+                        if (s != null) _appIcon = new Icon(s);
+                    }
+                }
+                catch { }
+                if (_appIcon == null)
+                {
+                    try { _appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); }
+                    catch { }
+                }
+                return _appIcon;
+            }
+        }
+
+        public static void ApplyIcon(Form f)
+        {
+            try
+            {
+                if (f == null) return;
+                Icon i = AppIcon;
+                if (i != null) { f.Icon = i; f.ShowIcon = true; }
+            }
+            catch { }
+        }
+
+        // Подтверждение с украинскими подписями кнопок (вместо системных
+        // русских «Да/Нет/Отмена» из MessageBox).
+        public static DialogResult Ask(string text, string title,
+            MessageBoxButtons buttons, MessageBoxIcon icon)
+        {
+            try
+            {
+                int[] ids;
+                string[] captions;
+                uint flags = 0;
+                if (buttons == MessageBoxButtons.YesNo)
+                {
+                    ids = new int[] { 6, 7 };
+                    captions = new string[] { "ТАК", "НІ" };
+                }
+                else if (buttons == MessageBoxButtons.YesNoCancel)
+                {
+                    ids = new int[] { 6, 7, 2 };
+                    captions = new string[] { "ТАК", "НІ", "ВІДМІНА" };
+                    flags = 0x0008;   // TDF_ALLOW_DIALOG_CANCELLATION
+                }
+                else
+                {
+                    return MessageBox.Show(text, title, buttons, icon);
+                }
+
+                int id = ShowTaskDialog(text, title, icon,
+                    ids, captions, 6, flags);
+                if (id < 0) return MessageBox.Show(text, title, buttons, icon);
+                if (id == 6) return DialogResult.Yes;
+                if (id == 7) return DialogResult.No;
+                return DialogResult.Cancel;
+            }
+            catch
+            {
+                return MessageBox.Show(text, title, buttons, icon);
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1, CharSet = CharSet.Unicode)]
+        private struct TaskDialogButton
+        {
+            public int Id;
+            public IntPtr Text;
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1, CharSet = CharSet.Unicode)]
+        private struct TaskDialogConfig
+        {
+            public uint Size;
+            public IntPtr Parent;
+            public IntPtr Instance;
+            public uint Flags;
+            public uint CommonButtons;
+            public IntPtr WindowTitle;
+            public IntPtr MainIcon;
+            public IntPtr MainInstruction;
+            public IntPtr Content;
+            public uint ButtonCount;
+            public IntPtr Buttons;
+            public int DefaultButton;
+            public uint RadioCount;
+            public IntPtr RadioButtons;
+            public int DefaultRadioButton;
+            public IntPtr VerificationText;
+            public IntPtr ExpandedInformation;
+            public IntPtr ExpandedControlText;
+            public IntPtr CollapsedControlText;
+            public IntPtr FooterIcon;
+            public IntPtr Footer;
+            public IntPtr Callback;
+            public IntPtr CallbackData;
+            public uint Width;
+        }
+
+        [DllImport("comctl32.dll", CharSet = CharSet.Unicode)]
+        private static extern int TaskDialogIndirect(ref TaskDialogConfig config,
+            out int button, out int radioButton, out bool verification);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetActiveWindow();
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr LoadIcon(IntPtr instance, IntPtr name);
+
+        private static int ShowTaskDialog(string text, string title,
+            MessageBoxIcon icon, int[] ids, string[] captions,
+            int defaultId, uint flags)
+        {
+            IntPtr[] texts = new IntPtr[captions.Length];
+            IntPtr buttons = IntPtr.Zero;
+            IntPtr windowTitle = IntPtr.Zero;
+            IntPtr content = IntPtr.Zero;
+            try
+            {
+                int stride = Marshal.SizeOf(typeof(TaskDialogButton));
+                buttons = Marshal.AllocHGlobal(stride * captions.Length);
+                for (int i = 0; i < captions.Length; i++)
+                {
+                    texts[i] = Marshal.StringToHGlobalUni(captions[i]);
+                    TaskDialogButton b = new TaskDialogButton();
+                    b.Id = ids[i];
+                    b.Text = texts[i];
+                    Marshal.StructureToPtr(b,
+                        new IntPtr(buttons.ToInt64() + i * stride), false);
+                }
+                windowTitle = Marshal.StringToHGlobalUni(title ?? string.Empty);
+                content = Marshal.StringToHGlobalUni(text ?? string.Empty);
+                TaskDialogConfig cfg = new TaskDialogConfig();
+                cfg.Size = (uint)Marshal.SizeOf(typeof(TaskDialogConfig));
+                cfg.Parent = GetActiveWindow();
+                cfg.Flags = flags;
+                cfg.WindowTitle = windowTitle;
+                if (icon == MessageBoxIcon.Question)
+                {
+                    cfg.Flags |= 0x0002;   // TDF_USE_HICON_MAIN
+                    cfg.MainIcon = LoadIcon(IntPtr.Zero, new IntPtr(32514));
+                }
+                else
+                {
+                    cfg.MainIcon = new IntPtr(IconResource(icon));
+                }
+                cfg.Content = content;
+                cfg.ButtonCount = (uint)captions.Length;
+                cfg.Buttons = buttons;
+                cfg.DefaultButton = defaultId;
+                int button, radio;
+                bool verification;
+                int hr = TaskDialogIndirect(ref cfg, out button, out radio,
+                    out verification);
+                if (hr != 0) return -1;
+                return button;
+            }
+            finally
+            {
+                for (int i = 0; i < texts.Length; i++)
+                    if (texts[i] != IntPtr.Zero) Marshal.FreeHGlobal(texts[i]);
+                if (buttons != IntPtr.Zero) Marshal.FreeHGlobal(buttons);
+                if (windowTitle != IntPtr.Zero) Marshal.FreeHGlobal(windowTitle);
+                if (content != IntPtr.Zero) Marshal.FreeHGlobal(content);
+            }
+        }
+
+        // Стандартный значок TaskDialog: 0xFFFF - предупреждение,
+        // 0xFFFE - ошибка, 0xFFFD - сведения, 0 - без значка.
+        private static int IconResource(MessageBoxIcon icon)
+        {
+            switch (icon)
+            {
+                case MessageBoxIcon.Error:
+                    return 0xFFFE;
+                case MessageBoxIcon.Question:
+                case MessageBoxIcon.Information:
+                    return 0xFFFD;
+                case MessageBoxIcon.Warning:
+                    return 0xFFFF;
+                default:
+                    return 0;
+            }
+        }
+
+        // Значок навесного замка заданной высоты (для поля пароля).
+        // Рисуется кодом, поэтому чёткий при любом размере.
+        public static Image LockImage(int size)
+        {
+            try
+            {
+                if (size < 8) size = 8;
+                Bitmap bmp = new Bitmap(size, size,
+                    System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                using (Graphics g = Graphics.FromImage(bmp))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    g.Clear(Color.Transparent);
+                    float s = size;
+                    Color c = Color.FromArgb(96, 106, 118);
+                    float pw = Math.Max(1.4f, s * 0.075f);
+                    using (Pen p = new Pen(c, pw))
+                    {
+                        p.StartCap = LineCap.Round;
+                        p.EndCap = LineCap.Round;
+                        p.LineJoin = LineJoin.Round;
+                        g.DrawArc(p, s * 0.30f, s * 0.18f,
+                            s * 0.40f, s * 0.56f, 180, 180);
+                        using (GraphicsPath body = RoundRect(
+                            s * 0.22f, s * 0.46f, s * 0.56f, s * 0.40f, s * 0.10f))
+                            g.DrawPath(p, body);
+                    }
+                    using (SolidBrush b = new SolidBrush(c))
+                    {
+                        g.FillEllipse(b, s * 0.445f, s * 0.555f,
+                            s * 0.11f, s * 0.11f);
+                        g.FillRectangle(b, s * 0.49f, s * 0.64f,
+                            s * 0.02f, s * 0.13f);
+                    }
+                }
+                return bmp;
+            }
+            catch { return null; }
+        }
+
+        // Значок «глаз» для кнопки показа пароля. crossed=true - глаз
+        // перечёркнут (пароль сейчас виден, нажатие его скроет).
+        public static Image EyeImage(int size, bool crossed)
+        {
+            try
+            {
+                if (size < 8) size = 8;
+                Bitmap bmp = new Bitmap(size, size,
+                    System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                using (Graphics g = Graphics.FromImage(bmp))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    g.Clear(Color.Transparent);
+                    float s = size;
+                    Color c = Color.FromArgb(96, 106, 118);
+                    float pw = Math.Max(1.3f, s * 0.065f);
+                    using (Pen p = new Pen(c, pw))
+                    {
+                        p.StartCap = LineCap.Round;
+                        p.EndCap = LineCap.Round;
+                        float w = s * 0.76f, h = s * 0.46f;
+                        float ex = (s - w) / 2f, ey = (s - h) / 2f;
+                        using (GraphicsPath eye = new GraphicsPath())
+                        {
+                            eye.AddBezier(ex, ey + h / 2f,
+                                ex + w * 0.25f, ey,
+                                ex + w * 0.75f, ey,
+                                ex + w, ey + h / 2f);
+                            eye.AddBezier(ex + w, ey + h / 2f,
+                                ex + w * 0.75f, ey + h,
+                                ex + w * 0.25f, ey + h,
+                                ex, ey + h / 2f);
+                            eye.CloseFigure();
+                            g.DrawPath(p, eye);
+                        }
+                        if (crossed)
+                            g.DrawLine(p, s * 0.22f, s * 0.80f,
+                                s * 0.80f, s * 0.22f);
+                    }
+                    using (SolidBrush b = new SolidBrush(c))
+                        g.FillEllipse(b, s * 0.42f, s * 0.42f,
+                            s * 0.16f, s * 0.16f);
+                }
+                return bmp;
+            }
+            catch { return null; }
+        }
+
+        private static GraphicsPath RoundRect(float x, float y,
+            float w, float h, float r)
+        {
+            GraphicsPath p = new GraphicsPath();
+            float d = r * 2;
+            p.AddArc(x, y, d, d, 180, 90);
+            p.AddArc(x + w - d, y, d, d, 270, 90);
+            p.AddArc(x + w - d, y + h - d, d, d, 0, 90);
+            p.AddArc(x, y + h - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+
+        // Заголовок раздела меню: неактивный и приглушённый, чтобы
+        // визуально отделять группы пунктов без лишних разделителей.
+        public static ToolStripItem MenuHeader(string text)
+        {
+            ToolStripLabel h = new ToolStripLabel(text);
+            try
+            {
+                h.Font = new Font(SystemFonts.MenuFont, FontStyle.Bold);
+                h.ForeColor = SystemColors.GrayText;
+                h.Padding = new Padding(4, 3, 4, 1);
+                h.Enabled = false;
+            }
+            catch { }
+            return h;
+        }
+    }
+
+    internal static class MenuIcons
+    {
+        private static readonly Dictionary<string, Image> _cache =
+            new Dictionary<string, Image>(StringComparer.Ordinal);
+
+        private static readonly Color Green = Color.FromArgb(46, 160, 67);
+        private static readonly Color Red = Color.FromArgb(214, 69, 69);
+        private static readonly Color Blue = Color.FromArgb(47, 114, 214);
+        private static readonly Color Amber = Color.FromArgb(224, 158, 38);
+        private static readonly Color Slate = Color.FromArgb(92, 102, 114);
+
+        public static Image Get(string kind)
+        {
+            Image img;
+            if (_cache.TryGetValue(kind, out img)) return img;
+            try { img = Draw(kind); }
+            catch { img = null; }
+            _cache[kind] = img;
+            return img;
+        }
+
+        private static Image Draw(string kind)
+        {
+            Bitmap bmp = new Bitmap(16, 16,
+                System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.Clear(Color.Transparent);
+                switch (kind)
+                {
+                    case "block":     Badge(g, Red);   Lock(g, Red);       break;
+                    case "unblock":   Badge(g, Green); Check(g);           break;
+                    case "add":       Badge(g, Green); Plus(g, true);      break;
+                    case "remove":    Badge(g, Red);   Plus(g, false);     break;
+                    case "export":    Badge(g, Blue);  Arrow(g, true);     break;
+                    case "import":    Badge(g, Blue);  Arrow(g, false);    break;
+                    case "view":      Badge(g, Blue);  Lines(g);           break;
+                    case "journal":   Badge(g, Amber); Document(g, Amber); break;
+                    case "install":   Badge(g, Green); Gear(g);            break;
+                    case "svcrm":     Badge(g, Red);   Cross(g);           break;
+                    case "uninstall": Badge(g, Red);   Trash(g, Red);      break;
+                    case "password":  Badge(g, Amber); Key(g);             break;
+                    case "language":  Badge(g, Blue);  Globe(g);           break;
+                    case "exit":      Badge(g, Slate); Power(g);           break;
+                }
+            }
+            return bmp;
+        }
+
+        private static void Badge(Graphics g, Color c)
+        {
+            using (SolidBrush b = new SolidBrush(c))
+                g.FillEllipse(b, 1f, 1f, 14f, 14f);
+            using (Pen p = new Pen(Color.FromArgb(45, 0, 0, 0), 1f))
+                g.DrawEllipse(p, 1.25f, 1.25f, 13.5f, 13.5f);
+        }
+
+        private static Pen White(float w)
+        {
+            Pen p = new Pen(Color.White, w);
+            p.StartCap = LineCap.Round;
+            p.EndCap = LineCap.Round;
+            p.LineJoin = LineJoin.Round;
+            return p;
+        }
+
+        private static void Plus(Graphics g, bool plus)
+        {
+            using (Pen p = White(1.9f))
+            {
+                g.DrawLine(p, 5.4f, 8f, 10.6f, 8f);
+                if (plus) g.DrawLine(p, 8f, 5.4f, 8f, 10.6f);
+            }
+        }
+
+        private static void Check(Graphics g)
+        {
+            using (Pen p = White(1.9f))
+                g.DrawLines(p, new PointF[] {
+                    new PointF(5.2f, 8.2f),
+                    new PointF(7.2f, 10.1f),
+                    new PointF(10.8f, 5.9f) });
+        }
+
+        private static void Cross(Graphics g)
+        {
+            using (Pen p = White(1.9f))
+            {
+                g.DrawLine(p, 5.8f, 5.8f, 10.2f, 10.2f);
+                g.DrawLine(p, 10.2f, 5.8f, 5.8f, 10.2f);
+            }
+        }
+
+        private static void Arrow(Graphics g, bool up)
+        {
+            using (Pen p = White(1.9f))
+            {
+                if (up)
+                {
+                    g.DrawLine(p, 8f, 11f, 8f, 5.2f);
+                    g.DrawLines(p, new PointF[] {
+                        new PointF(5.7f, 7.4f),
+                        new PointF(8f, 5.1f),
+                        new PointF(10.3f, 7.4f) });
+                }
+                else
+                {
+                    g.DrawLine(p, 8f, 5f, 8f, 10.8f);
+                    g.DrawLines(p, new PointF[] {
+                        new PointF(5.7f, 8.6f),
+                        new PointF(8f, 10.9f),
+                        new PointF(10.3f, 8.6f) });
+                }
+            }
+        }
+
+        private static void Lines(Graphics g)
+        {
+            using (Pen p = White(1.6f))
+            {
+                g.DrawLine(p, 5.2f, 5.8f, 10.8f, 5.8f);
+                g.DrawLine(p, 5.2f, 8f, 10.8f, 8f);
+                g.DrawLine(p, 5.2f, 10.2f, 9f, 10.2f);
+            }
+        }
+
+        private static void Lock(Graphics g, Color badge)
+        {
+            using (Pen p = White(1.5f))
+                g.DrawArc(p, 5.3f, 4.4f, 5.4f, 5.4f, 180, 180);
+            using (SolidBrush b = new SolidBrush(Color.White))
+                g.FillRectangle(b, 5.3f, 7.6f, 5.4f, 4.3f);
+            using (SolidBrush b = new SolidBrush(badge))
+            {
+                g.FillEllipse(b, 7.2f, 8.7f, 1.6f, 1.6f);
+                g.FillRectangle(b, 7.7f, 9.6f, 0.6f, 1.2f);
+            }
+        }
+
+        private static void Document(Graphics g, Color badge)
+        {
+            using (SolidBrush b = new SolidBrush(Color.White))
+                g.FillRectangle(b, 5.2f, 4.4f, 5.6f, 7.2f);
+            using (Pen p = new Pen(badge, 1.1f))
+            {
+                g.DrawLine(p, 6.4f, 6.4f, 9.6f, 6.4f);
+                g.DrawLine(p, 6.4f, 8f, 9.6f, 8f);
+                g.DrawLine(p, 6.4f, 9.6f, 8.8f, 9.6f);
+            }
+        }
+
+        private static void Gear(Graphics g)
+        {
+            using (Pen p = White(1.5f))
+            {
+                g.DrawEllipse(p, 6.2f, 6.2f, 3.6f, 3.6f);
+                for (int i = 0; i < 8; i++)
+                {
+                    double a = Math.PI * i / 4.0;
+                    float x1 = (float)(8 + Math.Cos(a) * 2.9);
+                    float y1 = (float)(8 + Math.Sin(a) * 2.9);
+                    float x2 = (float)(8 + Math.Cos(a) * 4.3);
+                    float y2 = (float)(8 + Math.Sin(a) * 4.3);
+                    g.DrawLine(p, x1, y1, x2, y2);
+                }
+            }
+        }
+
+        private static void Trash(Graphics g, Color badge)
+        {
+            using (Pen p = White(1.5f))
+            {
+                g.DrawLine(p, 5.4f, 5.6f, 10.6f, 5.6f);
+                g.DrawLine(p, 6.8f, 4.4f, 9.2f, 4.4f);
+                g.DrawLines(p, new PointF[] {
+                    new PointF(6f, 5.6f),
+                    new PointF(6.6f, 11.2f),
+                    new PointF(9.4f, 11.2f),
+                    new PointF(10f, 5.6f) });
+            }
+            using (Pen p = new Pen(badge, 1.1f))
+            {
+                g.DrawLine(p, 7.5f, 7f, 7.5f, 9.9f);
+                g.DrawLine(p, 8.5f, 7f, 8.5f, 9.9f);
+            }
+        }
+
+        private static void Key(Graphics g)
+        {
+            using (Pen p = White(1.5f))
+            {
+                g.DrawEllipse(p, 5.1f, 4.9f, 3.3f, 3.3f);
+                g.DrawLine(p, 8f, 8f, 11.2f, 11.2f);
+                g.DrawLine(p, 9.7f, 9.7f, 10.6f, 8.8f);
+                g.DrawLine(p, 10.4f, 10.4f, 11.3f, 9.5f);
+            }
+        }
+
+        private static void Globe(Graphics g)
+        {
+            using (Pen p = White(1.4f))
+            {
+                g.DrawEllipse(p, 4.2f, 4.2f, 7.6f, 7.6f);
+                g.DrawLine(p, 4.2f, 8f, 11.8f, 8f);
+                g.DrawEllipse(p, 6.6f, 4.2f, 2.8f, 7.6f);
+            }
+        }
+
+        private static void Power(Graphics g)
+        {
+            using (Pen p = White(1.7f))
+            {
+                g.DrawArc(p, 4.7f, 4.7f, 6.6f, 6.6f, 135, 270);
+                g.DrawLine(p, 8f, 4.2f, 8f, 7.8f);
+            }
+        }
+    }
+
+    public sealed class NotifyPopup : Form
+    {
+        // Радиус скругления углов окна и толщина рамки: рамка рисуется
+        // GDI+ внутри клиентской области, а регион обрезает углы фона.
+        private const int Corner = 10;
+        private const int Border = 2;
+
+        private System.Windows.Forms.Timer _close;
+        private Label _lbl;
+        private readonly Size _textSize;
+        public int TopOffset = 0;
+
+        // Id события, которое показывает это окно (устанавливает NotifyService).
+        // -1 = тестовое окно, счётчик просмотренных событий не продвигается.
+        public long NotificationId = -1;
+
+        // Срабатывает, когда окно фактически показано (для NotifyService это
+        // сигнал "событие id донесено до экрана" - только тогда продвигается
+        // NotifyStore.SetLastSeen). Для тестового окна (NotificationId=-1)
+        // событие не вызывается.
+        public event Action<long> Displayed;
+
+        public int ExpectedHeight
+        {
+            get { return _textSize.Height + 32; }
+        }
+
+        public NotifyPopup(string text, int closeMs = 6000)
+        {
+            this.FormBorderStyle = FormBorderStyle.None;
+            this.StartPosition = FormStartPosition.Manual;
+            this.ShowInTaskbar = false;
+            this.TopMost = true;
+            this.Font = SystemFonts.MessageBoxFont;
+            this.AutoScaleDimensions = new SizeF(7F, 15F);   // метрики Segoe UI 9 пт (проектные)
+            this.AutoScaleMode = AutoScaleMode.Font;
+            this.BackColor = SystemColors.Control;
+            // Скруглённые углы и рамка рисуются GDI+ целиком в OnPaint:
+            // двойная буферизация и одна отрисовка без WM_ERASEBKGND,
+            // иначе рамка и углы мигают при показе окна.
+            this.SetStyle(ControlStyles.UserPaint |
+                ControlStyles.AllPaintingInWmPaint |
+                ControlStyles.OptimizedDoubleBuffer, true);
+
+            _textSize = TextRenderer.MeasureText(text, this.Font,
+                new Size(350, int.MaxValue), TextFormatFlags.WordBreak);
+            int w = Math.Max(200, _textSize.Width + 8);
+            int h = Math.Max(40, _textSize.Height + 8);
+
+            _lbl = new Label();
+            _lbl.Text = text;
+            _lbl.Size = new Size(w, h);
+            _lbl.Font = this.Font;
+            _lbl.ForeColor = SystemColors.ControlText;
+            _lbl.Location = new Point(14, 12);
+            this.Controls.Add(_lbl);
+
+            this.Click += delegate { CloseSelf(); };
+            _lbl.Click += delegate { CloseSelf(); };
+
+            _close = new System.Windows.Forms.Timer();
+            _close.Interval = closeMs;
+            _close.Tick += delegate { CloseSelf(); };
+        }
+
+        protected override void OnLoad(EventArgs e)
+        {
+            base.OnLoad(e);
+            // Границы считаются ДО показа окна: при StartPosition=Manual
+            // и Location, задававшемся только в OnShown, окно успевало
+            // появиться в левом верхнем углу (DefaultLocation) - DWM
+            // показывал этот кадр, и пользователь видел вспышку перед
+            // переходом в правый нижний угол. OnLoad вызывается до того,
+            // как окно станет видимым; TopOffset к этому моменту уже
+            // установлен вызывающей стороной (ShowNext).
+            ApplyBounds();
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            // Повторный расчёт (идемпотентный, обычно ничего не меняется):
+            // страхует от масштабирования по шрифту после загрузки.
+            ApplyBounds();
+            _close.Start();
+
+            Action<long> shown = Displayed;
+            if (shown != null && NotificationId >= 0)
+            {
+                try { shown(NotificationId); }
+                catch { }
+            }
+        }
+
+        // Размер по тексту, скруглённый регион и позиция в правом нижнем
+        // углу рабочей области (с учётом TopOffset для стопки окон).
+        private void ApplyBounds()
+        {
+            Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+            this.ClientSize = new Size(_textSize.Width + 30, Math.Max(50, _textSize.Height + 24));
+            // Скруглённые углы: регион по итоговой клиентской области.
+            using (GraphicsPath path = RoundRect(
+                new Rectangle(Point.Empty, this.ClientSize), Corner))
+            {
+                Region old = this.Region;
+                this.Region = new Region(path);
+                if (old != null) old.Dispose();
+            }
+            this.Location = new Point(wa.Right - this.Width - 12,
+                wa.Bottom - this.Height - 12 - TopOffset);
+        }
+
+        // Рамка с закруглёнными углами: контур того же пути, что и регион
+        // (PenAlignment.Inset - штрих идёт внутрь и не вылезает за край).
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            Rectangle r = new Rectangle(0, 0,
+                Math.Max(1, ClientSize.Width - 1),
+                Math.Max(1, ClientSize.Height - 1));
+            using (GraphicsPath path = RoundRect(r, Corner))
+            using (Pen pen = new Pen(SystemColors.ControlDarkDark, Border))
+            {
+                pen.Alignment = PenAlignment.Inset;
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.DrawPath(pen, path);
+            }
+        }
+
+        private static GraphicsPath RoundRect(Rectangle r, int radius)
+        {
+            int d = radius * 2;
+            GraphicsPath p = new GraphicsPath();
+            p.AddArc(r.X, r.Y, d, d, 180, 90);
+            p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+
+        private void CloseSelf()
+        {
+            _close.Stop();
+            this.Close();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (_close != null)
+            {
+                _close.Dispose();
+                _close = null;
+            }
+            if (this.Region != null)
+            {
+                this.Region.Dispose();
+                this.Region = null;
+            }
+            base.Dispose(disposing);
+        }
+    }
+
+    // =====================================================================
+    // Служба мониторинга (запуск через диспетчер служб, системная учётная
+    // запись LocalSystem): в фоне снимает точки монтирования посторонних
+    // накопителей, уведомления пишутся в журнал событий.
+    // =====================================================================
+
+
     public static class AppIcons
     {
         private static readonly byte[] TrailerMagic =
@@ -5680,11 +7137,18 @@ foreach (string path in oldFiles.Keys)
             catch
             {
             }
+            List<DeviceEntry> wlList = UsbMonitor.GetWhitelist();
             foreach (StorageDevice sd in _devices)
             {
-                sd.Allowed =
-                    (!string.IsNullOrEmpty(sd.Serial) && wl.Contains("SN:" + sd.Serial)) ||
-                    (!string.IsNullOrEmpty(sd.UsbId) && wl.Contains("USB:" + sd.UsbId));
+                sd.Allowed = false;
+                foreach (DeviceEntry x in wlList)
+                {
+                    // Серійний номер - головний ознака: якщо відомий у обох
+                    // сторін і РІЗНИЙ - це інший пристрій (два однакові
+                    // телефони мають однаковий VID&PID, але різні серійники).
+                    if (UsbJournalMonitor.EntryMatches(x, sd.UsbId, sd.Serial))
+                    { sd.Allowed = true; break; }
+                }
             }
         }
 
@@ -5718,14 +7182,14 @@ foreach (string path in oldFiles.Keys)
             int i = _cbDevice.SelectedIndex;
             if (i < 0 || i >= _devices.Count) return;
             StorageDevice sd = _devices[i];
-            _tbType.Text = sd.UsbId;
+            _tbType.Text = string.IsNullOrEmpty(sd.UsbId) ? (sd.PnpInstanceId ?? string.Empty) : sd.UsbId;
             _tbModel.Text = string.IsNullOrEmpty(sd.BestDiskId) ? sd.Model : sd.BestDiskId;
-            _ok.Enabled = !string.IsNullOrEmpty(sd.UsbId);
+            _ok.Enabled = !string.IsNullOrEmpty(sd.UsbId) || !string.IsNullOrEmpty(sd.PnpInstanceId);
             // По умолчанию в "Ім'я Пристрою" подставляется метка тома
             // выбранного накопителя. Если метки нет - подставляем "USB-пристрій".
             string def = sd.Label;
             if (string.IsNullOrEmpty(def))
-                def = Loc.T("USB-пристрій");
+                def = "USB-пристрій";
             _tbName.Text = def ?? string.Empty;
         }
 
@@ -5769,8 +7233,8 @@ foreach (string path in oldFiles.Keys)
                     if (string.IsNullOrEmpty(x.Name)) continue;
                     if (string.Equals(x.Name.Trim(), name, StringComparison.OrdinalIgnoreCase))
                     {
-                        MessageBox.Show(Loc.T("Пристрій з таким ім'ям уже є в whitelist.\n") +
-                                        Loc.T("Введіть інше ім'я."),
+                        MessageBox.Show("Пристрій з таким ім'ям уже є в whitelist.\n" +
+                                        "Введіть інше ім'я.",
                             Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                         _tbName.Focus();
                         _tbName.SelectAll();
@@ -5795,8 +7259,8 @@ foreach (string path in oldFiles.Keys)
                     return;
                 }
                 string msg = Loc.T("Для пристрою знайдено мітку тому:") +
-                    "\n«" + label + "»\n\n" +
-                    Loc.T("Залишити її як ім'я пристрою в whitelist?") + "\n" +
+                    Loc.T("\n«") + label + Loc.T("»\n\n") +
+                    Loc.T("Залишити її як ім'я пристрою в whitelist?\n") +
                     Loc.T("ТАК - залишити мітку, НІ - ввести власну назву.");
                 DialogResult keep = Ui.Ask(msg, Program.Title,
                     MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
@@ -5823,8 +7287,8 @@ foreach (string path in oldFiles.Keys)
                         if (string.IsNullOrEmpty(x.Name)) continue;
                         if (string.Equals(x.Name.Trim(), name, StringComparison.OrdinalIgnoreCase))
                         {
-                            MessageBox.Show(Loc.T("Пристрій з таким ім'ям уже є в whitelist.\n") +
-                                            Loc.T("Введіть інше ім'я."),
+                            MessageBox.Show("Пристрій з таким ім'ям уже є в whitelist.\n" +
+                                            "Введіть інше ім'я.",
                                 Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                             _tbName.Focus();
                             _tbName.SelectAll();
@@ -5907,8 +7371,8 @@ foreach (string path in oldFiles.Keys)
             _entries = entries;
 
             this.Text = Loc.T("Видалити пристрій із WHITELIST");
-            Ui.ApplyIcon(this);
-            this.StartPosition = FormStartPosition.CenterScreen;
+
+            Ui.ApplyIcon(this);            this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
             this.MinimizeBox = false;
@@ -6273,8 +7737,8 @@ foreach (string path in oldFiles.Keys)
             Dictionary<string, string> volumeLabels)
         {
             this.Text = Loc.T("WHITELIST - дозволені USB-накопичувачі");
-            Ui.ApplyIcon(this);
-            this.StartPosition = FormStartPosition.CenterScreen;
+
+            Ui.ApplyIcon(this);            this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
             this.MaximizeBox = false;
             this.MinimizeBox = false;
@@ -6419,8 +7883,8 @@ foreach (string path in oldFiles.Keys)
         public JournalViewForm()
         {
             this.Text = Loc.T("Журнал USB-блокування");
-            Ui.ApplyIcon(this);
-            this.StartPosition = FormStartPosition.CenterScreen;
+
+            Ui.ApplyIcon(this);            this.StartPosition = FormStartPosition.CenterScreen;
             this.FormBorderStyle = FormBorderStyle.Sizable;
             this.MinimizeBox = false;
             this.ClientSize = new Size(1000, 620);
@@ -6430,8 +7894,6 @@ foreach (string path in oldFiles.Keys)
 
             _tabs = new TabControl();
             _tabs.SetBounds(12, 8, 976, 560);
-            _tabs.Anchor = AnchorStyles.Top | AnchorStyles.Bottom
-                | AnchorStyles.Left | AnchorStyles.Right;
             this.Controls.Add(_tabs);
 
             _devices = MakeBox();
@@ -6443,20 +7905,17 @@ foreach (string path in oldFiles.Keys)
 
             _status = new Label();
             _status.SetBounds(12, 574, 434, 22);
-            _status.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
             this.Controls.Add(_status);
 
             _open = new Button();
             _open.Text = Loc.T("Відкрити файл...");
             _open.SetBounds(452, 572, 124, 27);
-            _open.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
             _open.Click += delegate { OpenExternal(); };
             this.Controls.Add(_open);
 
             _live = new Button();
             _live.Text = Loc.T("До журналу");
             _live.SetBounds(584, 572, 116, 27);
-            _live.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
             _live.Enabled = false;
             _live.Click += delegate { _external = null; Fill(); };
             this.Controls.Add(_live);
@@ -6464,14 +7923,12 @@ foreach (string path in oldFiles.Keys)
             Button refresh = new Button();
             refresh.Text = Loc.T("Оновити");
             refresh.SetBounds(708, 572, 108, 27);
-            refresh.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
             refresh.Click += delegate { Fill(); };
             this.Controls.Add(refresh);
 
             Button copy = new Button();
             copy.Text = Loc.T("Копіювати");
             copy.SetBounds(824, 572, 116, 27);
-            copy.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
             copy.Click += delegate { CopyCurrent(); };
             this.Controls.Add(copy);
 
@@ -7077,9 +8534,8 @@ foreach (string path in oldFiles.Keys)
         }
 
         // Задача контроля службы: раз в минуту от имени SYSTEM запускает
-        // --ensure-service, который поднимает службу, если её остановили,
-        // отключили или удалили (удалённую ставит заново). Скрытая, без
-        // ограничения времени выполнения.
+        // --ensure-service, который поднимает службу, если её остановили или
+        // отключили. Скрытая, без ограничения времени выполнения.
         private static string BuildGuardXml()
         {
             string command = "\"" + ProtectedCopy.InstallExe + "\"";
@@ -7223,10 +8679,6 @@ foreach (string path in oldFiles.Keys)
             }
         }
 
-        // Подсказка-клавиша пункта меню: цифра/буква убирается из текста
-        // и показывается справа серым, как в системных меню. Сам ярлык при
-        // этом НЕ назначается (ShortcutKeys), иначе цифры перехватывались бы
-        // глобально - это только оформление.
         private static void SetHint(ToolStripMenuItem item, string hint)
         {
             if (item == null || string.IsNullOrEmpty(hint)) return;
@@ -7236,13 +8688,13 @@ foreach (string path in oldFiles.Keys)
                 item.Text = t.Substring(hint.Length + 1);
         }
 
+
+
         private void BuildMenu()
         {
             _menu = new ContextMenuStrip();
 
             _miStatus = new ToolStripMenuItem(StatusText());
-            try { _miStatus.Font = new Font(SystemFonts.MenuFont, FontStyle.Bold); }
-            catch { }
             _menu.Items.Add(_miStatus);
             ApplyStatusColor();
             _menu.Items.Add(new ToolStripSeparator());
@@ -7271,56 +8723,56 @@ foreach (string path in oldFiles.Keys)
                 _menu.Items.Add(new ToolStripSeparator());
 
                 ToolStripMenuItem mExitLimited = new ToolStripMenuItem(Loc.T("Вихід"));
-                mExitLimited.Image = MenuIcons.Get("exit");
                 mExitLimited.Click += delegate { this.ExitThread(); };
+                mExitLimited.Image = MenuIcons.Get("exit");
                 _menu.Items.Add(mExitLimited);
 
                 _icon.ContextMenuStrip = _menu;
                 return;
             }
 
-            _menu.Items.Add(Ui.MenuHeader("WHITELIST"));
+            _menu.Items.Add(Ui.MenuHeader(Loc.T("WHITELIST")));
 
             ToolStripMenuItem mBlock = new ToolStripMenuItem(Loc.T("1 Блокувати пристрої"));
+            mBlock.Click += delegate { DoBlock(); };
             SetHint(mBlock, "1");
             mBlock.Image = MenuIcons.Get("block");
-            mBlock.Click += delegate { DoBlock(); };
             _menu.Items.Add(mBlock);
 
             ToolStripMenuItem mUnblock = new ToolStripMenuItem(Loc.T("2 Розблокувати пристрої"));
+            mUnblock.Click += delegate { DoUnblock(); };
             SetHint(mUnblock, "2");
             mUnblock.Image = MenuIcons.Get("unblock");
-            mUnblock.Click += delegate { DoUnblock(); };
             _menu.Items.Add(mUnblock);
 
             ToolStripMenuItem mAdd = new ToolStripMenuItem(Loc.T("3 Додати пристрій"));
+            mAdd.Click += delegate { DoAddDevice(); };
             SetHint(mAdd, "3");
             mAdd.Image = MenuIcons.Get("add");
-            mAdd.Click += delegate { DoAddDevice(); };
             _menu.Items.Add(mAdd);
 
             ToolStripMenuItem mRemove = new ToolStripMenuItem(Loc.T("4 Видалити пристрій із WHITELIST..."));
+            mRemove.Click += delegate { DoRemoveDevice(); };
             SetHint(mRemove, "4");
             mRemove.Image = MenuIcons.Get("remove");
-            mRemove.Click += delegate { DoRemoveDevice(); };
             _menu.Items.Add(mRemove);
 
             ToolStripMenuItem mExport = new ToolStripMenuItem(Loc.T("5 Експортувати WHITELIST..."));
+            mExport.Click += delegate { DoExport(); };
             SetHint(mExport, "5");
             mExport.Image = MenuIcons.Get("export");
-            mExport.Click += delegate { DoExport(); };
             _menu.Items.Add(mExport);
 
             ToolStripMenuItem mImport = new ToolStripMenuItem(Loc.T("6 Імпортувати WHITELIST..."));
+            mImport.Click += delegate { DoImport(); };
             SetHint(mImport, "6");
             mImport.Image = MenuIcons.Get("import");
-            mImport.Click += delegate { DoImport(); };
             _menu.Items.Add(mImport);
 
             ToolStripMenuItem mView = new ToolStripMenuItem(Loc.T("0 Переглянути WHITELIST..."));
+            mView.Click += delegate { DoViewWhitelist(); };
             SetHint(mView, "0");
             mView.Image = MenuIcons.Get("view");
-            mView.Click += delegate { DoViewWhitelist(); };
             _menu.Items.Add(mView);
 
             // Галочка J - это журнал КОПИРОВАНИЯ (про файлы). Журнал подключений
@@ -7329,39 +8781,40 @@ foreach (string path in oldFiles.Keys)
             // При включении здесь же задаётся дополнительное сочетание -
             // второе на ту же функцию, что и Ctrl+Alt+O.
             _miJournal = new ToolStripMenuItem(Loc.T("J Вести журнал копіювання"));
-            _miJournal.Image = MenuIcons.Get("journal");
-            SetHint(_miJournal, "J");
             _miJournal.Click += delegate { DoToggleJournal(); };
+            SetHint(_miJournal, "J");
+            _miJournal.Image = MenuIcons.Get("journal");
             _menu.Items.Add(_miJournal);
 
             _menu.Items.Add(new ToolStripSeparator());
+
             _menu.Items.Add(Ui.MenuHeader(Loc.T("СЛУЖБА")));
 
             _miSvcInstall = new ToolStripMenuItem(Loc.T("7 Встановити службу"));
+            _miSvcInstall.Click += delegate { DoInstallService(); };
             SetHint(_miSvcInstall, "7");
             _miSvcInstall.Image = MenuIcons.Get("install");
-            _miSvcInstall.Click += delegate { DoInstallService(); };
             _menu.Items.Add(_miSvcInstall);
 
             _miSvcRemove = new ToolStripMenuItem(Loc.T("8 Видалити службу"));
+            _miSvcRemove.Click += delegate { DoRemoveService(); };
             SetHint(_miSvcRemove, "8");
             _miSvcRemove.Image = MenuIcons.Get("svcrm");
-            _miSvcRemove.Click += delegate { DoRemoveService(); };
             _menu.Items.Add(_miSvcRemove);
 
             _menu.Items.Add(new ToolStripSeparator());
 
             ToolStripMenuItem mUninstall = new ToolStripMenuItem(Loc.T("9 Видалити застосунок..."));
+            mUninstall.Click += delegate { DoUninstall(); };
             SetHint(mUninstall, "9");
             mUninstall.Image = MenuIcons.Get("uninstall");
-            mUninstall.Click += delegate { DoUninstall(); };
             _menu.Items.Add(mUninstall);
 
             _menu.Items.Add(new ToolStripSeparator());
 
             ToolStripMenuItem mDelPass = new ToolStripMenuItem(Loc.T("Видалити пароль"));
-            mDelPass.Image = MenuIcons.Get("password");
             mDelPass.Click += delegate { DoRemovePassword(); };
+            mDelPass.Image = MenuIcons.Get("password");
             _menu.Items.Add(mDelPass);
 
             _menu.Items.Add(new ToolStripSeparator());
@@ -7370,8 +8823,8 @@ foreach (string path in oldFiles.Keys)
             _menu.Items.Add(new ToolStripSeparator());
 
             ToolStripMenuItem mExit = new ToolStripMenuItem(Loc.T("Вихід"));
-            mExit.Image = MenuIcons.Get("exit");
             mExit.Click += delegate { this.ExitThread(); };
+            mExit.Image = MenuIcons.Get("exit");
             _menu.Items.Add(mExit);
 
             _icon.ContextMenuStrip = _menu;
@@ -7411,7 +8864,7 @@ foreach (string path in oldFiles.Keys)
             string msg = (lang == LanguageSettings.English)
                 ? "Language will change after the tray restarts. Restart now?"
                 : "Мову буде змінено після перезапуску трея. Перезапустити зараз?";
-            if (Ui.Ask(msg, Program.Title,
+            if (MessageBox.Show(msg, Program.Title,
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
             {
                 RestartTray();
@@ -7459,7 +8912,6 @@ foreach (string path in oldFiles.Keys)
             _miJournal.Text = Loc.T("J Вести журнал копіювання ") +
                 (on ? Loc.T("(увімкнено") + (string.IsNullOrEmpty(extra) ? "" : ", " + extra) + ")"
                      : Loc.T("(вимкнено)"));
-            SetHint(_miJournal, "J");
         }
 
         private void RefreshStatus()
@@ -7570,14 +9022,18 @@ foreach (string path in oldFiles.Keys)
             {
                 if (f.ShowDialog() != DialogResult.OK) return;
                 StorageDevice sd = f.Selected;
-                if (sd == null || string.IsNullOrEmpty(sd.UsbId)) return;
+                if (sd == null || (string.IsNullOrEmpty(sd.UsbId) && string.IsNullOrEmpty(sd.PnpInstanceId))) return;
 
                 DeviceEntry e = new DeviceEntry();
                 e.Name = string.IsNullOrEmpty(f.DeviceName) || string.IsNullOrEmpty(f.DeviceName.Trim())
                     ? sd.Model : f.DeviceName.Trim();
                 e.UsbId = sd.UsbId;
+                if (string.IsNullOrEmpty(e.UsbId) && !string.IsNullOrEmpty(sd.PnpInstanceId))
+                    e.UsbId = sd.PnpInstanceId;
                 e.DiskId = sd.BestDiskId;
                 e.Serial = sd.Serial;
+                if (string.IsNullOrEmpty(e.Serial) && !string.IsNullOrEmpty(sd.PnpInstanceId))
+                    e.Serial = sd.PnpInstanceId;
                 e.AddedAt = DateTime.Now;
 
                 // Проверка дубликата: тот же накопитель уже разрешён -
@@ -7608,6 +9064,13 @@ foreach (string path in oldFiles.Keys)
                 UsbMonitor.Refresh();
                 MountUtil.RestoreAll();
 
+                if (sd.IsWpd && !string.IsNullOrEmpty(sd.PnpInstanceId))
+                {
+                    UsbQuery.EnablePnpDevice(sd.PnpInstanceId);
+                    try { UsbQuery.RemoveDisabledWpdRecord(sd.PnpInstanceId); } catch { }
+                    PnPUtil.Scan();
+                }
+
                 // Разрешаем монтирование добавленного накопителя: заново
                 // создаём точки подключения для тех, что были заблокированы
                 // (по серийному номеру), затем перечитываем состояние.
@@ -7627,10 +9090,17 @@ foreach (string path in oldFiles.Keys)
                 }
 
                 RefreshStatus();
-                MessageBox.Show(Loc.T("Додано пристроїв: ") + added.Count.ToString(CultureInfo.InvariantCulture) + "\n" +
-                                Loc.T("Дозволено до монтування: ") + mounted.ToString(CultureInfo.InvariantCulture) + "\n" +
-                                Loc.T("Накопичувач дозволено і він отримає літеру диска автоматично."),
-                    Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                if (sd.IsWpd)
+                    MessageBox.Show(Loc.T("MTP/WPD-пристрій дозволено.\n") +
+                                    Loc.T("Щоб телефон знову з'явився у Провіднику,\n") +
+                                    Loc.T("перепідключіть кабель (від'єднайте й під'єднайте)\n") +
+                                    Loc.T("і оберіть на телефоні «Передача файлів»."),
+                        Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                else
+                    MessageBox.Show(Loc.T("Додано пристроїв: ") + added.Count.ToString(CultureInfo.InvariantCulture) + "\n" +
+                                    Loc.T("Дозволено до монтування: ") + mounted.ToString(CultureInfo.InvariantCulture) + "\n" +
+                                    Loc.T("Накопичувач дозволено і він отримає літеру диска автоматично."),
+                        Program.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
         }
 
@@ -7699,25 +9169,16 @@ foreach (string path in oldFiles.Keys)
                         break;
                     }
                 }
-                if (found != null)
-                {
-                    // У заблокированного тома нет буквы: метку достаём по
-                    // пути тома (кэш или Win32_Volume), иначе поле имени
-                    // осталось бы пустым и вопрос не появился бы.
-                    if (string.IsNullOrEmpty(found.Label))
-                        found.Label = UsbQuery.GetVolumeLabelByPath(rec.VolumePath);
-                    continue;
-                }
+                // Запись учёта без соответствующего ПОДКЛЮЧЁННОГО диска -
+                // это накопитель, который уже отключили; в списке «Додати
+                // пристрій» он не нужен (иначе там копятся старые устройства).
+                if (found == null) continue;
 
-                StorageDevice sd = new StorageDevice();
-                sd.Serial = rec.Serial;
-                sd.UsbId = string.IsNullOrEmpty(rec.UsbId)
-                    ? UsbQuery.FindUsbIdBySerial(rec.Serial)
-                    : rec.UsbId;
-                sd.BestDiskId = UsbQuery.FindDiskIdBySerial(rec.Serial);
-                sd.Model = Loc.T("(заблоковано)");
-                sd.Label = UsbQuery.GetVolumeLabelByPath(rec.VolumePath);
-                devices.Add(sd);
+                // У заблокированного тома нет буквы: метку достаём по
+                // пути тома (кэш или Win32_Volume), иначе поле имени
+                // осталось бы пустым и вопрос не появился бы.
+                if (string.IsNullOrEmpty(found.Label))
+                    found.Label = UsbQuery.GetVolumeLabelByPath(rec.VolumePath);
             }
 
             // Метки (имена) томов подключённых накопителей: "Серийный" -> "Метка".
@@ -7750,6 +9211,41 @@ foreach (string path in oldFiles.Keys)
             {
             }
 
+            // MTP/WPD, которые СЕЙЧАС присутствуют.
+            try
+            {
+                foreach (StorageDevice ws in UsbQuery.GetWpdPortableDevices())
+                {
+                    bool exists = false;
+                    foreach (StorageDevice d in devices)
+                    {
+                        if (!string.IsNullOrEmpty(ws.PnpInstanceId) && !string.IsNullOrEmpty(d.PnpInstanceId) && string.Equals(ws.PnpInstanceId,d.PnpInstanceId,StringComparison.OrdinalIgnoreCase)) { exists=true; break; }
+                        if (!string.IsNullOrEmpty(ws.UsbId) && !string.IsNullOrEmpty(d.UsbId) && string.Equals(ws.UsbId,d.UsbId,StringComparison.OrdinalIgnoreCase)) { exists=true; break; }
+                    }
+                    if (!exists) devices.Add(ws);
+                }
+            }
+            catch { }
+
+            // MTP/WPD, которые МЫ уже отключили: в списке присутствующих их
+            // нет, но пользователь должен иметь возможность внести их в
+            // whitelist (тогда устройство будет включено обратно).
+            try
+            {
+                foreach (StorageDevice ws in UsbQuery.GetDisabledWpdDevices())
+                {
+                    bool exists = false;
+                    foreach (StorageDevice d in devices)
+                    {
+                        if (!string.IsNullOrEmpty(ws.PnpInstanceId) && !string.IsNullOrEmpty(d.PnpInstanceId) &&
+                            string.Equals(ws.PnpInstanceId, d.PnpInstanceId, StringComparison.OrdinalIgnoreCase))
+                        { exists = true; break; }
+                    }
+                    if (!exists) devices.Add(ws);
+                }
+            }
+            catch { }
+
             return devices;
         }
 
@@ -7781,7 +9277,7 @@ foreach (string path in oldFiles.Keys)
                 StringBuilder q = new StringBuilder();
                 foreach (DeviceEntry e in selected)
                     q.AppendLine("* " + DescribeEntry(e));
-                if (Ui.Ask(
+                if (MessageBox.Show(
                         Loc.T("Видалити з WHITELIST і заблокувати?\n\n") + q.ToString(),
                         Program.Title, MessageBoxButtons.YesNo, MessageBoxIcon.Warning)
                     != DialogResult.Yes)
@@ -7854,13 +9350,7 @@ foreach (string path in oldFiles.Keys)
         private static bool VolumeMatchesEntry(UsbVolume v, DeviceEntry e)
         {
             if (v == null || e == null) return false;
-            if (!string.IsNullOrEmpty(e.UsbId) &&
-                !string.Equals(e.UsbId, v.UsbId ?? "", StringComparison.OrdinalIgnoreCase))
-                return false;
-            if (!string.IsNullOrEmpty(e.Serial) && !string.IsNullOrEmpty(v.Serial) &&
-                !string.Equals(e.Serial, v.Serial, StringComparison.OrdinalIgnoreCase))
-                return false;
-            return true;
+            return UsbJournalMonitor.EntryMatches(e, v.UsbId, v.Serial);
         }
 
         private static string DescribeEntry(DeviceEntry e)
@@ -7962,10 +9452,10 @@ foreach (string path in oldFiles.Keys)
                 msg.AppendLine();
                 msg.AppendLine(Loc.T("Як застосувати імпортовані дані?"));
                 msg.AppendLine();
-                msg.AppendLine(Loc.T("  «ТАК»       - перезаписати (замінити) поточний whitelist"));
-                msg.AppendLine(Loc.T("  «НІ»        - додати до поточного whitelist (об'єднати)"));
-                msg.AppendLine(Loc.T("  «ВІДМІНА» - скасувати"));
-                DialogResult action = Ui.Ask(msg.ToString(), Program.Title,
+                msg.AppendLine(Loc.T("  «Так»       - перезаписати (замінити) поточний whitelist"));
+                msg.AppendLine(Loc.T("  «Ні»        - додати до поточного whitelist (об'єднати)"));
+                msg.AppendLine(Loc.T("  «Скасувати» - скасувати"));
+                DialogResult action = MessageBox.Show(msg.ToString(), Program.Title,
                     MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
                 if (action == DialogResult.Cancel) return;
 
@@ -8317,7 +9807,7 @@ foreach (string path in oldFiles.Keys)
             if (!EnsureAdmin()) return;
             if (!EnsurePassword()) return;
 
-            if (Ui.Ask(
+            if (MessageBox.Show(
                     Loc.T("Видалити застосунок?\n\r") +
                     Loc.T("Буде видалено:\n") +
                     Loc.T("  - службу моніторингу (якщо встановлено)\n") +
@@ -8363,7 +9853,7 @@ foreach (string path in oldFiles.Keys)
             bool deleteData = false;
             if (Directory.Exists(StorePaths.Directory))
             {
-                if (Ui.Ask(
+                if (MessageBox.Show(
                         Loc.T("Видалити збережені дані?\n") +
                         Loc.T("  - whitelist (список дозволених пристроїв)\n") +
                         Loc.T("  - пароль захисту меню\n") +
@@ -8544,11 +10034,11 @@ foreach (string path in oldFiles.Keys)
                 }
                 if (!string.IsNullOrEmpty(current)) return current;
 
-                DialogResult dr = Ui.Ask(
+                DialogResult dr = MessageBox.Show(
                     Loc.T("Додаткову комбінацію не задано.\n\n") +
                     Loc.T("Журнал копіювання буде увімкнено, і відкривати його можна\n") +
                     Loc.T("лише основною комбінацією ") + HotkeyStore.DefaultText + ".\n\n" +
-                    Loc.T("(«НІ» - повернутися до вибору комбінації)"),
+                    Loc.T("(«Ні» - повернутися до вибору комбінації)"),
                     Program.Title, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                 if (dr == DialogResult.Yes) return string.Empty;
             }
@@ -8562,7 +10052,7 @@ foreach (string path in oldFiles.Keys)
                 sb.AppendLine(Loc.T("Пароль захисту вже встановлено."));
                 sb.AppendLine();
                 sb.AppendLine(Loc.T("Встановити новий пароль зараз?"));
-                sb.AppendLine(Loc.T("«НІ» - лишити попередній пароль."));
+                sb.AppendLine(Loc.T("«Ні» - лишити попередній пароль."));
             }
             else
             {
@@ -8581,7 +10071,7 @@ foreach (string path in oldFiles.Keys)
                 sb.AppendLine(Loc.T("Забутий пароль видаляється пунктом «Видалити пароль»."));
             }
 
-            if (Ui.Ask(sb.ToString(), Program.Title,
+            if (MessageBox.Show(sb.ToString(), Program.Title,
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
                 return true;
 
@@ -8634,13 +10124,13 @@ foreach (string path in oldFiles.Keys)
             StringBuilder sb = new StringBuilder();
             sb.AppendLine(Loc.T("Видалити пароль захисту?"));
             sb.AppendLine();
-            sb.AppendLine(Loc.T("  «ТАК»       - підтвердити поточним паролем"));
-            sb.AppendLine(Loc.T("  «НІ»        - підтвердити кодовим словом (якщо пароль забуто)"));
-            sb.AppendLine(Loc.T("  «ВІДМІНА» - нічого не робити"));
+            sb.AppendLine(Loc.T("  «Так»       - підтвердити поточним паролем"));
+            sb.AppendLine(Loc.T("  «Ні»        - підтвердити кодовим словом (якщо пароль забуто)"));
+            sb.AppendLine(Loc.T("  «Скасувати» - нічого не робити"));
             sb.AppendLine();
             sb.AppendLine(Loc.T("Після видалення пункти 2, 3, 4, 6, 8, 9 будуть"));
             sb.AppendLine(Loc.T("доступні без пароля."));
-            DialogResult how = Ui.Ask(sb.ToString(), Program.Title,
+            DialogResult how = MessageBox.Show(sb.ToString(), Program.Title,
                 MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
             if (how == DialogResult.Cancel) return;
 
@@ -9156,176 +10646,6 @@ foreach (string path in oldFiles.Keys)
                 NotifyStore.BlockDetail(e.Label) + ")";
         }
     }
-
-    // Всплывающее окно-сообщение (рамка с закруглёнными углами, справа
-    // внизу, закрывается само)
-    public sealed class NotifyPopup : Form
-    {
-        // Радиус скругления углов окна и толщина рамки: рамка рисуется
-        // GDI+ внутри клиентской области, а регион обрезает углы фона.
-        private const int Corner = 10;
-        private const int Border = 2;
-
-        private System.Windows.Forms.Timer _close;
-        private Label _lbl;
-        private readonly Size _textSize;
-        public int TopOffset = 0;
-
-        // Id события, которое показывает это окно (устанавливает NotifyService).
-        // -1 = тестовое окно, счётчик просмотренных событий не продвигается.
-        public long NotificationId = -1;
-
-        // Срабатывает, когда окно фактически показано (для NotifyService это
-        // сигнал "событие id донесено до экрана" - только тогда продвигается
-        // NotifyStore.SetLastSeen). Для тестового окна (NotificationId=-1)
-        // событие не вызывается.
-        public event Action<long> Displayed;
-
-        public int ExpectedHeight
-        {
-            get { return _textSize.Height + 32; }
-        }
-
-        public NotifyPopup(string text, int closeMs = 6000)
-        {
-            this.FormBorderStyle = FormBorderStyle.None;
-            this.StartPosition = FormStartPosition.Manual;
-            this.ShowInTaskbar = false;
-            this.TopMost = true;
-            this.Font = SystemFonts.MessageBoxFont;
-            this.AutoScaleDimensions = new SizeF(7F, 15F);   // метрики Segoe UI 9 пт (проектные)
-            this.AutoScaleMode = AutoScaleMode.Font;
-            this.BackColor = SystemColors.Control;
-            // Скруглённые углы и рамка рисуются GDI+ целиком в OnPaint:
-            // двойная буферизация и одна отрисовка без WM_ERASEBKGND,
-            // иначе рамка и углы мигают при показе окна.
-            this.SetStyle(ControlStyles.UserPaint |
-                ControlStyles.AllPaintingInWmPaint |
-                ControlStyles.OptimizedDoubleBuffer, true);
-
-            _textSize = TextRenderer.MeasureText(text, this.Font,
-                new Size(350, int.MaxValue), TextFormatFlags.WordBreak);
-            int w = Math.Max(200, _textSize.Width + 8);
-            int h = Math.Max(40, _textSize.Height + 8);
-
-            _lbl = new Label();
-            _lbl.Text = text;
-            _lbl.Size = new Size(w, h);
-            _lbl.Font = this.Font;
-            _lbl.ForeColor = SystemColors.ControlText;
-            _lbl.Location = new Point(14, 12);
-            this.Controls.Add(_lbl);
-
-            this.Click += delegate { CloseSelf(); };
-            _lbl.Click += delegate { CloseSelf(); };
-
-            _close = new System.Windows.Forms.Timer();
-            _close.Interval = closeMs;
-            _close.Tick += delegate { CloseSelf(); };
-        }
-
-        protected override void OnLoad(EventArgs e)
-        {
-            base.OnLoad(e);
-            // Границы считаются ДО показа окна: при StartPosition=Manual
-            // и Location, задававшемся только в OnShown, окно успевало
-            // появиться в левом верхнем углу (DefaultLocation) - DWM
-            // показывал этот кадр, и пользователь видел вспышку перед
-            // переходом в правый нижний угол. OnLoad вызывается до того,
-            // как окно станет видимым; TopOffset к этому моменту уже
-            // установлен вызывающей стороной (ShowNext).
-            ApplyBounds();
-        }
-
-        protected override void OnShown(EventArgs e)
-        {
-            base.OnShown(e);
-            // Повторный расчёт (идемпотентный, обычно ничего не меняется):
-            // страхует от масштабирования по шрифту после загрузки.
-            ApplyBounds();
-            _close.Start();
-
-            Action<long> shown = Displayed;
-            if (shown != null && NotificationId >= 0)
-            {
-                try { shown(NotificationId); }
-                catch { }
-            }
-        }
-
-        // Размер по тексту, скруглённый регион и позиция в правом нижнем
-        // углу рабочей области (с учётом TopOffset для стопки окон).
-        private void ApplyBounds()
-        {
-            Rectangle wa = Screen.PrimaryScreen.WorkingArea;
-            this.ClientSize = new Size(_textSize.Width + 30, Math.Max(50, _textSize.Height + 24));
-            // Скруглённые углы: регион по итоговой клиентской области.
-            using (GraphicsPath path = RoundRect(
-                new Rectangle(Point.Empty, this.ClientSize), Corner))
-            {
-                Region old = this.Region;
-                this.Region = new Region(path);
-                if (old != null) old.Dispose();
-            }
-            this.Location = new Point(wa.Right - this.Width - 12,
-                wa.Bottom - this.Height - 12 - TopOffset);
-        }
-
-        // Рамка с закруглёнными углами: контур того же пути, что и регион
-        // (PenAlignment.Inset - штрих идёт внутрь и не вылезает за край).
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            base.OnPaint(e);
-            Rectangle r = new Rectangle(0, 0,
-                Math.Max(1, ClientSize.Width - 1),
-                Math.Max(1, ClientSize.Height - 1));
-            using (GraphicsPath path = RoundRect(r, Corner))
-            using (Pen pen = new Pen(SystemColors.ControlDarkDark, Border))
-            {
-                pen.Alignment = PenAlignment.Inset;
-                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                e.Graphics.DrawPath(pen, path);
-            }
-        }
-
-        private static GraphicsPath RoundRect(Rectangle r, int radius)
-        {
-            int d = radius * 2;
-            GraphicsPath p = new GraphicsPath();
-            p.AddArc(r.X, r.Y, d, d, 180, 90);
-            p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
-            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-            p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
-            p.CloseFigure();
-            return p;
-        }
-
-        private void CloseSelf()
-        {
-            _close.Stop();
-            this.Close();
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-            if (_close != null)
-            {
-                _close.Dispose();
-                _close = null;
-            }
-            if (this.Region != null)
-            {
-                this.Region.Dispose();
-                this.Region = null;
-            }
-            base.Dispose(disposing);
-        }
-    }
-
-    // =====================================================================
-    // Служба мониторинга (запуск через диспетчер служб, системная учётная
-    // запись LocalSystem): в фоне снимает точки монтирования посторонних
-    // накопителей, уведомления пишутся в журнал событий.
     // =====================================================================
     public static class ServiceManager
     {
@@ -9444,91 +10764,32 @@ foreach (string path in oldFiles.Keys)
         }
 
         // Контроль службы (режим --ensure-service, запускается задачей от
-        // SYSTEM раз в минуту): если службу остановили, отключили,
-        // перенастроили или удалили - вернуть её в рабочее состояние.
-        // Главное здесь - пересоздание УДАЛЁННОЙ службы: "sc delete",
-        // удаление ключа службы или оснастка "Службы" больше не выключают
-        // защиту, служба ставится заново из защищённой копии.
+        // SYSTEM раз в минуту): если службу остановили или отключили -
+        // вернуть её в рабочее состояние.
         public static void EnsureRunning()
         {
             try
             {
-                if (!IsInstalled())
-                {
-                    Install();
-                    return;
-                }
-
-                string wanted = "\"" + ProtectedCopy.InstallExe + "\" --service";
-                bool restart = false;
+                if (!IsInstalled()) return;
                 try
                 {
                     using (ManagementObject svc = new ManagementObject(
                         @"\\.\root\cimv2:Win32_Service.Name='" + ServiceName + "'"))
                     {
-                        ManagementBaseObject inParams = svc.GetMethodParameters("Change");
-                        bool change = false;
-                        object path = svc["PathName"];
-                        if (path == null || !string.Equals(
-                            path.ToString().Trim(), wanted, StringComparison.OrdinalIgnoreCase))
-                        {
-                            inParams["PathName"] = wanted;
-                            change = true;
-                        }
                         object startMode = svc["StartMode"];
                         if (startMode != null && !string.Equals(
                             startMode.ToString(), "Auto", StringComparison.OrdinalIgnoreCase))
                         {
+                            ManagementBaseObject inParams = svc.GetMethodParameters("Change");
                             inParams["StartMode"] = "Automatic";
-                            change = true;
-                        }
-                        if (change)
-                        {
                             svc.InvokeMethod("Change", inParams, null);
-                            restart = true;
-                        }
-                        object startName = svc["StartName"];
-                        if (startName != null && !string.Equals(
-                            startName.ToString(), "LocalSystem", StringComparison.OrdinalIgnoreCase))
-                        {
-                            try
-                            {
-                                ManagementBaseObject p2 = svc.GetMethodParameters("Change");
-                                p2["StartName"] = "LocalSystem";
-                                svc.InvokeMethod("Change", p2, null);
-                                restart = true;
-                            }
-                            catch
-                            {
-                            }
                         }
                     }
                 }
                 catch
                 {
                 }
-                if (restart) Stop();
                 Start();
-            }
-            catch
-            {
-            }
-        }
-
-        public static void Stop()
-        {
-            try
-            {
-                using (ServiceController sc = new ServiceController(ServiceName))
-                {
-                    if (sc.Status != ServiceControllerStatus.Stopped &&
-                        sc.Status != ServiceControllerStatus.StopPending)
-                    {
-                        sc.Stop();
-                        sc.WaitForStatus(ServiceControllerStatus.Stopped,
-                            TimeSpan.FromSeconds(20));
-                    }
-                }
             }
             catch
             {
@@ -9558,43 +10819,38 @@ foreach (string path in oldFiles.Keys)
         {
             try
             {
-                if (!IsInstalled())
-                {
-                    TrayTask.DeleteGuard();
-                    return null;
-                }
-                // Сначала снимаем задачу контроля: иначе она по новой
-                // поставит только что удалённую службу (EnsureRunning).
-                TrayTask.DeleteGuard();
+                if (!IsInstalled()) return null;
                 ClearRecovery();
-                Stop();
-                // Служба могла успеть пересоздать задачу, пока останавливалась.
-                TrayTask.DeleteGuard();
+                using (ServiceController sc = new ServiceController(ServiceName))
+                {
+                    if (sc.Status != ServiceControllerStatus.Stopped &&
+                        sc.Status != ServiceControllerStatus.StopPending)
+                    {
+                        try
+                        {
+                            sc.Stop();
+                            sc.WaitForStatus(ServiceControllerStatus.Stopped,
+                                TimeSpan.FromSeconds(20));
+                        }
+                        catch
+                        {
+                            // останавливается при удалении
+                        }
+                    }
+                }
                 using (ManagementObject svc = new ManagementObject(
                     @"\\.\root\cimv2:Win32_Service.Name='" + ServiceName + "'"))
                 {
                     ManagementBaseObject outParams = svc.InvokeMethod("Delete", null, null);
                     uint ret = (uint)(outParams["ReturnValue"] ?? 0);
                     if (ret != 0)
-                    {
-                        // Не удалось - возвращаем самовосстановление, чтобы
-                        // защита не осталась выключенной.
-                        try { TrayTask.CreateGuardTask(); } catch { }
-                        Start();
                         return Loc.T("Не вдалося видалити службу (код ") +
                             ret.ToString(CultureInfo.InvariantCulture) + ")";
-                    }
+                    return null;
                 }
-                // Если во время удаления службу успели запустить - гасим её,
-                // иначе она останется работать до перезагрузки.
-                Stop();
-                TrayTask.DeleteGuard();
-                return null;
             }
             catch (Exception ex)
             {
-                try { TrayTask.CreateGuardTask(); } catch { }
-                Start();
                 return ex.Message;
             }
         }
@@ -9603,6 +10859,7 @@ foreach (string path in oldFiles.Keys)
     public sealed class UsbBlockService : ServiceBase
     {
         private System.Timers.Timer _timer;
+        private System.Timers.Timer _wpdTimer;
         private bool _busy;
         private int _healTicks;
 
@@ -9630,6 +10887,14 @@ foreach (string path in oldFiles.Keys)
             _timer.Elapsed += OnTick;
             _timer.Start();
             OnTick(null, null);
+
+            // Дополнительный быстрый таймер для блокирования WPD-устройств
+            // (смартфоны). Android renegotiates и пристрою переинициализируется
+            // за ~1-2 с, поэтому нужен более частый опрос.
+            _wpdTimer = new System.Timers.Timer(1000);
+            _wpdTimer.AutoReset = true;
+            _wpdTimer.Elapsed += OnWpdTick;
+            _wpdTimer.Start();
         }
 
         protected override void OnStop()
@@ -9640,6 +10905,13 @@ foreach (string path in oldFiles.Keys)
                 _timer.Elapsed -= OnTick;
                 _timer.Dispose();
                 _timer = null;
+            }
+            if (_wpdTimer != null)
+            {
+                _wpdTimer.Stop();
+                _wpdTimer.Elapsed -= OnWpdTick;
+                _wpdTimer.Dispose();
+                _wpdTimer = null;
             }
         }
 
@@ -9705,6 +10977,77 @@ foreach (string path in oldFiles.Keys)
                 _busy = false;
             }
         }
+
+        // Стан для швидкого шляху OnWpdTick: WMI-запит Win32_PnPEntity
+        // (GetWpdPortableDevices) коштує сотні мілісекунд - на тику 500 мс це
+        // зайве навантаження. WMI запускаємо ЛИШЕ коли змінився набір
+        // присутніх USB-пристроїв (дешевий CM-запит) або whitelist.
+        private HashSet<string> _wpdLastPresent;
+        private DateTime _wpdLastWhitelistStamp;
+        private bool _wpdLastBlocked;
+
+        private void OnWpdTick(object sender, System.Timers.ElapsedEventArgs e)
+        {
+            try
+            {
+                List<DeviceEntry> wl = UsbMonitor.GetWhitelist();
+                bool blocked = PolicyManager.IsBlocked();
+                DateTime wlStamp = UsbMonitor.CacheStamp();
+                HashSet<string> present = UsbQuery.GetPresentUsbDeviceIds();
+
+                if (_wpdLastPresent != null &&
+                    _wpdLastWhitelistStamp == wlStamp &&
+                    _wpdLastBlocked == blocked &&
+                    present.SetEquals(_wpdLastPresent))
+                {
+                    return; // нічого не змінилось - WMI не потрібен
+                }
+                _wpdLastPresent = present;
+                _wpdLastWhitelistStamp = wlStamp;
+                _wpdLastBlocked = blocked;
+
+                List<StorageDevice> wpdList = UsbQuery.GetWpdPortableDevices();
+                foreach (StorageDevice ws in wpdList)
+                {
+                    if (string.IsNullOrEmpty(ws.PnpInstanceId)) continue;
+                    bool allowed = false;
+                    if (blocked && wl != null)
+                    {
+                        foreach (DeviceEntry ent in wl)
+                        {
+                            // Серійний номер - головний ознака: якщо він відомий
+                            // у обох сторін і РІЗНИЙ - це інший пристрій, навіть
+                            // якщо VID&PID збігаються (два однакові телефони).
+                            if (UsbJournalMonitor.EntryMatches(ent, ws.UsbId, ws.Serial)) { allowed = true; break; }
+                            if (!string.IsNullOrEmpty(ws.PnpInstanceId) && !string.IsNullOrEmpty(ent.Serial) &&
+                                string.Equals(ws.PnpInstanceId, ent.Serial, StringComparison.OrdinalIgnoreCase))
+                            { allowed = true; break; }
+                        }
+                    }
+                    else
+                    {
+                        // Блокування вимкнено - дозволяємо все
+                        allowed = true;
+                    }
+                    try { PnPUtil.SetWpdAccessPolicy(ws.PnpInstanceId, !allowed); } catch { }
+                    if (!allowed)
+                    {
+                        // Важкий ланцюг - лише якщо пристрій ще не записаний
+                        if (!UsbQuery.HasDisabledWpdRecord(ws.PnpInstanceId))
+                        {
+                            try { UsbQuery.AddDisabledWpdRecord(ws.PnpInstanceId, ws.Model); } catch { }
+                            UsbQuery.DisablePnpDevice(ws.PnpInstanceId);
+                        }
+                    }
+                    else
+                    {
+                        try { UsbQuery.RemoveDisabledWpdRecord(ws.PnpInstanceId); } catch { }
+                    }
+                }
+            }
+            catch { }
+        }
+
     }
 
     // =====================================================================
@@ -10052,73 +11395,6 @@ foreach (string path in oldFiles.Keys)
             {
             }
             return false;
-        }
-
-        // Запущен ли уже значок трея (usb_block_tray.exe БЕЗ служебных
-        // режимов) в ТЕКУЩЕЙ сессии пользователя. Нужно, чтобы при
-        // перезапуске не появился второй значок. То же имя exe носят служба
-        // (--service), уведомитель (--notify) и задача контроля
-        // (--ensure-service) - их треем не считаем, поэтому проверяем ещё и
-        // командную строку, и номер сессии (служба живёт в сессии 0).
-        internal static bool TrayInstanceRunning()
-        {
-            int myPid;
-            int mySession;
-            using (Process cur = Process.GetCurrentProcess())
-            {
-                myPid = cur.Id;
-                mySession = cur.SessionId;
-            }
-            try
-            {
-                using (ManagementObjectSearcher s = new ManagementObjectSearcher(
-                    "SELECT ProcessId, SessionId, CommandLine FROM Win32_Process " +
-                    "WHERE Name='usb_block_tray.exe'"))
-                {
-                    foreach (ManagementObject mo in s.Get())
-                    {
-                        using (mo)
-                        {
-                            int pid = Convert.ToInt32(mo["ProcessId"],
-                                CultureInfo.InvariantCulture);
-                            if (pid == myPid) continue;
-                            int sid = Convert.ToInt32(mo["SessionId"],
-                                CultureInfo.InvariantCulture);
-                            if (sid != mySession) continue;
-                            string cl = mo["CommandLine"] as string;
-                            if (cl == null) continue;
-                            if (!IsServiceMode(cl)) return true;
-                        }
-                    }
-                }
-            }
-            catch
-            {
-            }
-            return false;
-        }
-
-        // Служебные режимы exe (служба/уведомитель/контроль/разовые) - это
-        // НЕ значок трея.
-        private static bool IsServiceMode(string cmdLine)
-        {
-            string[] flags =
-            {
-                "--service", "-service", "--notify", "-notify",
-                "--ensure-service", "-ensure-service", "--journal", "-journal",
-                "--diag", "-diag", "--selftest", "-selftest",
-                "--testpopup", "-testpopup", "--makecopies", "-makecopies"
-            };
-            foreach (string f in flags)
-                if (cmdLine.IndexOf(f, StringComparison.OrdinalIgnoreCase) >= 0)
-                    return true;
-            return false;
-        }
-
-        // Хук для самопроверки: различение служебных режимов и трея.
-        internal static bool IsServiceModeForTest(string cmdLine)
-        {
-            return IsServiceMode(cmdLine);
         }
 
         // Краткая сводка очереди событий (HKLM\SOFTWARE\USB_Block\Events) и
@@ -10919,7 +12195,11 @@ foreach (string path in oldFiles.Keys)
                     // он перепишет или подменит уже записанное. Проверяем
                     // правами файла, а не попыткой записи: результат не должен
                     // зависеть от того, под чем запущена самопроверка.
-                    bool aclChecked = false, aclAllow = false, aclNoWrite = false;
+                    bool aclChecked = false, aclAllow = false;
+                    // aclNoWrite - флаг "нарушений прав не видно" (AND-цепочка):
+                    // стартует TRUE, любое нарушение делает его FALSE.
+                    // Раньше стартовал FALSE - проверка всегда падала FAIL.
+                    bool aclNoWrite = true;
                     bool aclPending = false;
                     try
                     {
@@ -10943,7 +12223,7 @@ foreach (string path in oldFiles.Keys)
                                 FileSystemRights have = r.FileSystemRights;
                                 aclAllow = aclAllow ||
                                     (have & FileSystemRights.AppendData) != 0;
-                                aclNoWrite = aclNoWrite && (have & FileSystemRights.Write) == 0 &&
+                                aclNoWrite = aclNoWrite && (have & FileSystemRights.WriteData) == 0 &&
                                     (have & FileSystemRights.Delete) == 0;
                             }
                             if (!aclAllow && !Program.IsAdministrator())
@@ -11140,29 +12420,6 @@ foreach (string path in oldFiles.Keys)
                 {
                     sb.AppendLine("Task guard XML ERROR: " + ex.Message);
                 }
-
-                // 7) Различение режимов одного exe: служба (--service),
-                //    уведомитель (--notify) и контроль (--ensure-service) -
-                //    НЕ трей, а --logon и запуск без аргументов - трей. От
-                //    этого зависит, не стартует ли второй значок при
-                //    перезапуске (одно имя exe у всех режимов).
-                try
-                {
-                    bool svc = Diag.IsServiceModeForTest("\"usb_block_tray.exe\" --service");
-                    bool nfy = Diag.IsServiceModeForTest("\"usb_block_tray.exe\" --notify");
-                    bool grd = Diag.IsServiceModeForTest("\"usb_block_tray.exe\" --ensure-service");
-                    bool lgn = Diag.IsServiceModeForTest("\"usb_block_tray.exe\" --logon");
-                    bool pln = Diag.IsServiceModeForTest("\"usb_block_tray.exe\"");
-                    bool modeOk = svc && nfy && grd && !lgn && !pln;
-                    sb.AppendLine("Tray single-instance (служба/уведомитель/контроль != трей): " +
-                        (modeOk ? "OK" : "FAIL") +
-                        " (svc=" + svc + " notify=" + nfy + " guard=" + grd +
-                        " logon=" + lgn + " plain=" + pln + ")");
-                }
-                catch (Exception ex)
-                {
-                    sb.AppendLine("Tray single-instance ERROR: " + ex.Message);
-                }
             }
             finally
             {
@@ -11281,550 +12538,6 @@ foreach (string path in oldFiles.Keys)
                 return true;
             }
             catch { return false; }
-        }
-    }
-
-    // Общее оформление окон и меню. Держим в одном месте, чтобы диалоги
-    // и контекстное меню выглядели одинаково.
-    internal static class Ui
-    {
-        private static Icon _appIcon;
-
-        // Значок приложения из встроенного ресурса (тот же, что у трея).
-        public static Icon AppIcon
-        {
-            get
-            {
-                if (_appIcon != null) return _appIcon;
-                try
-                {
-                    using (Stream s = Assembly.GetExecutingAssembly()
-                        .GetManifestResourceStream("usb_block.tray.ico"))
-                    {
-                        if (s != null) _appIcon = new Icon(s);
-                    }
-                }
-                catch { }
-                if (_appIcon == null)
-                {
-                    try { _appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); }
-                    catch { }
-                }
-                return _appIcon;
-            }
-        }
-
-        public static void ApplyIcon(Form f)
-        {
-            try
-            {
-                if (f == null) return;
-                Icon i = AppIcon;
-                if (i != null) { f.Icon = i; f.ShowIcon = true; }
-            }
-            catch { }
-        }
-
-        // Подтверждение с украинскими подписями кнопок (вместо системных
-        // русских «Да/Нет/Отмена» из MessageBox).
-        public static DialogResult Ask(string text, string title,
-            MessageBoxButtons buttons, MessageBoxIcon icon)
-        {
-            try
-            {
-                int[] ids;
-                string[] captions;
-                uint flags = 0;
-                if (buttons == MessageBoxButtons.YesNo)
-                {
-                    ids = new int[] { 6, 7 };
-                    captions = new string[] { Loc.T("ТАК"), Loc.T("НІ") };
-                }
-                else if (buttons == MessageBoxButtons.YesNoCancel)
-                {
-                    ids = new int[] { 6, 7, 2 };
-                    captions = new string[] { Loc.T("ТАК"), Loc.T("НІ"), Loc.T("ВІДМІНА") };
-                    flags = 0x0008;   // TDF_ALLOW_DIALOG_CANCELLATION
-                }
-                else
-                {
-                    return MessageBox.Show(text, title, buttons, icon);
-                }
-
-                int id = ShowTaskDialog(text, title, icon,
-                    ids, captions, 6, flags);
-                if (id < 0) return MessageBox.Show(text, title, buttons, icon);
-                if (id == 6) return DialogResult.Yes;
-                if (id == 7) return DialogResult.No;
-                return DialogResult.Cancel;
-            }
-            catch
-            {
-                return MessageBox.Show(text, title, buttons, icon);
-            }
-        }
-
-        [StructLayout(LayoutKind.Sequential, Pack = 1, CharSet = CharSet.Unicode)]
-        private struct TaskDialogButton
-        {
-            public int Id;
-            public IntPtr Text;
-        }
-
-        [StructLayout(LayoutKind.Sequential, Pack = 1, CharSet = CharSet.Unicode)]
-        private struct TaskDialogConfig
-        {
-            public uint Size;
-            public IntPtr Parent;
-            public IntPtr Instance;
-            public uint Flags;
-            public uint CommonButtons;
-            public IntPtr WindowTitle;
-            public IntPtr MainIcon;
-            public IntPtr MainInstruction;
-            public IntPtr Content;
-            public uint ButtonCount;
-            public IntPtr Buttons;
-            public int DefaultButton;
-            public uint RadioCount;
-            public IntPtr RadioButtons;
-            public int DefaultRadioButton;
-            public IntPtr VerificationText;
-            public IntPtr ExpandedInformation;
-            public IntPtr ExpandedControlText;
-            public IntPtr CollapsedControlText;
-            public IntPtr FooterIcon;
-            public IntPtr Footer;
-            public IntPtr Callback;
-            public IntPtr CallbackData;
-            public uint Width;
-        }
-
-        [DllImport("comctl32.dll", CharSet = CharSet.Unicode)]
-        private static extern int TaskDialogIndirect(ref TaskDialogConfig config,
-            out int button, out int radioButton, out bool verification);
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr GetActiveWindow();
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr LoadIcon(IntPtr instance, IntPtr name);
-
-        private static int ShowTaskDialog(string text, string title,
-            MessageBoxIcon icon, int[] ids, string[] captions,
-            int defaultId, uint flags)
-        {
-            IntPtr[] texts = new IntPtr[captions.Length];
-            IntPtr buttons = IntPtr.Zero;
-            IntPtr windowTitle = IntPtr.Zero;
-            IntPtr content = IntPtr.Zero;
-            try
-            {
-                int stride = Marshal.SizeOf(typeof(TaskDialogButton));
-                buttons = Marshal.AllocHGlobal(stride * captions.Length);
-                for (int i = 0; i < captions.Length; i++)
-                {
-                    texts[i] = Marshal.StringToHGlobalUni(captions[i]);
-                    TaskDialogButton b = new TaskDialogButton();
-                    b.Id = ids[i];
-                    b.Text = texts[i];
-                    Marshal.StructureToPtr(b,
-                        new IntPtr(buttons.ToInt64() + i * stride), false);
-                }
-                windowTitle = Marshal.StringToHGlobalUni(title ?? string.Empty);
-                content = Marshal.StringToHGlobalUni(text ?? string.Empty);
-                TaskDialogConfig cfg = new TaskDialogConfig();
-                cfg.Size = (uint)Marshal.SizeOf(typeof(TaskDialogConfig));
-                cfg.Parent = GetActiveWindow();
-                cfg.Flags = flags;
-                cfg.WindowTitle = windowTitle;
-                if (icon == MessageBoxIcon.Question)
-                {
-                    cfg.Flags |= 0x0002;   // TDF_USE_HICON_MAIN
-                    cfg.MainIcon = LoadIcon(IntPtr.Zero, new IntPtr(32514));
-                }
-                else
-                {
-                    cfg.MainIcon = new IntPtr(IconResource(icon));
-                }
-                cfg.Content = content;
-                cfg.ButtonCount = (uint)captions.Length;
-                cfg.Buttons = buttons;
-                cfg.DefaultButton = defaultId;
-                int button, radio;
-                bool verification;
-                int hr = TaskDialogIndirect(ref cfg, out button, out radio,
-                    out verification);
-                if (hr != 0) return -1;
-                return button;
-            }
-            finally
-            {
-                for (int i = 0; i < texts.Length; i++)
-                    if (texts[i] != IntPtr.Zero) Marshal.FreeHGlobal(texts[i]);
-                if (buttons != IntPtr.Zero) Marshal.FreeHGlobal(buttons);
-                if (windowTitle != IntPtr.Zero) Marshal.FreeHGlobal(windowTitle);
-                if (content != IntPtr.Zero) Marshal.FreeHGlobal(content);
-            }
-        }
-
-        // Стандартный значок TaskDialog: 0xFFFF - предупреждение,
-        // 0xFFFE - ошибка, 0xFFFD - сведения, 0 - без значка.
-        private static int IconResource(MessageBoxIcon icon)
-        {
-            switch (icon)
-            {
-                case MessageBoxIcon.Error:
-                    return 0xFFFE;
-                case MessageBoxIcon.Question:
-                case MessageBoxIcon.Information:
-                    return 0xFFFD;
-                case MessageBoxIcon.Warning:
-                    return 0xFFFF;
-                default:
-                    return 0;
-            }
-        }
-
-        // Значок навесного замка заданной высоты (для поля пароля).
-        // Рисуется кодом, поэтому чёткий при любом размере.
-        public static Image LockImage(int size)
-        {
-            try
-            {
-                if (size < 8) size = 8;
-                Bitmap bmp = new Bitmap(size, size,
-                    System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-                using (Graphics g = Graphics.FromImage(bmp))
-                {
-                    g.SmoothingMode = SmoothingMode.AntiAlias;
-                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                    g.Clear(Color.Transparent);
-                    float s = size;
-                    Color c = Color.FromArgb(96, 106, 118);
-                    float pw = Math.Max(1.4f, s * 0.075f);
-                    using (Pen p = new Pen(c, pw))
-                    {
-                        p.StartCap = LineCap.Round;
-                        p.EndCap = LineCap.Round;
-                        p.LineJoin = LineJoin.Round;
-                        g.DrawArc(p, s * 0.30f, s * 0.18f,
-                            s * 0.40f, s * 0.56f, 180, 180);
-                        using (GraphicsPath body = RoundRect(
-                            s * 0.22f, s * 0.46f, s * 0.56f, s * 0.40f, s * 0.10f))
-                            g.DrawPath(p, body);
-                    }
-                    using (SolidBrush b = new SolidBrush(c))
-                    {
-                        g.FillEllipse(b, s * 0.445f, s * 0.555f,
-                            s * 0.11f, s * 0.11f);
-                        g.FillRectangle(b, s * 0.49f, s * 0.64f,
-                            s * 0.02f, s * 0.13f);
-                    }
-                }
-                return bmp;
-            }
-            catch { return null; }
-        }
-
-        // Значок «глаз» для кнопки показа пароля. crossed=true - глаз
-        // перечёркнут (пароль сейчас виден, нажатие его скроет).
-        public static Image EyeImage(int size, bool crossed)
-        {
-            try
-            {
-                if (size < 8) size = 8;
-                Bitmap bmp = new Bitmap(size, size,
-                    System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-                using (Graphics g = Graphics.FromImage(bmp))
-                {
-                    g.SmoothingMode = SmoothingMode.AntiAlias;
-                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                    g.Clear(Color.Transparent);
-                    float s = size;
-                    Color c = Color.FromArgb(96, 106, 118);
-                    float pw = Math.Max(1.3f, s * 0.065f);
-                    using (Pen p = new Pen(c, pw))
-                    {
-                        p.StartCap = LineCap.Round;
-                        p.EndCap = LineCap.Round;
-                        float w = s * 0.76f, h = s * 0.46f;
-                        float ex = (s - w) / 2f, ey = (s - h) / 2f;
-                        using (GraphicsPath eye = new GraphicsPath())
-                        {
-                            eye.AddBezier(ex, ey + h / 2f,
-                                ex + w * 0.25f, ey,
-                                ex + w * 0.75f, ey,
-                                ex + w, ey + h / 2f);
-                            eye.AddBezier(ex + w, ey + h / 2f,
-                                ex + w * 0.75f, ey + h,
-                                ex + w * 0.25f, ey + h,
-                                ex, ey + h / 2f);
-                            eye.CloseFigure();
-                            g.DrawPath(p, eye);
-                        }
-                        if (crossed)
-                            g.DrawLine(p, s * 0.22f, s * 0.80f,
-                                s * 0.80f, s * 0.22f);
-                    }
-                    using (SolidBrush b = new SolidBrush(c))
-                        g.FillEllipse(b, s * 0.42f, s * 0.42f,
-                            s * 0.16f, s * 0.16f);
-                }
-                return bmp;
-            }
-            catch { return null; }
-        }
-
-        private static GraphicsPath RoundRect(float x, float y,
-            float w, float h, float r)
-        {
-            GraphicsPath p = new GraphicsPath();
-            float d = r * 2;
-            p.AddArc(x, y, d, d, 180, 90);
-            p.AddArc(x + w - d, y, d, d, 270, 90);
-            p.AddArc(x + w - d, y + h - d, d, d, 0, 90);
-            p.AddArc(x, y + h - d, d, d, 90, 90);
-            p.CloseFigure();
-            return p;
-        }
-
-        // Заголовок раздела меню: неактивный и приглушённый, чтобы
-        // визуально отделять группы пунктов без лишних разделителей.
-        public static ToolStripItem MenuHeader(string text)
-        {
-            ToolStripLabel h = new ToolStripLabel(text);
-            try
-            {
-                h.Font = new Font(SystemFonts.MenuFont, FontStyle.Bold);
-                h.ForeColor = SystemColors.GrayText;
-                h.Padding = new Padding(4, 3, 4, 1);
-                h.Enabled = false;
-            }
-            catch { }
-            return h;
-        }
-    }
-
-    // Небольшие значки пунктов меню рисуются кодом, чтобы не тащить в
-    // сборку лишние файлы. Кэшируются на время работы процесса.
-    internal static class MenuIcons
-    {
-        private static readonly Dictionary<string, Image> _cache =
-            new Dictionary<string, Image>(StringComparer.Ordinal);
-
-        private static readonly Color Green = Color.FromArgb(46, 160, 67);
-        private static readonly Color Red = Color.FromArgb(214, 69, 69);
-        private static readonly Color Blue = Color.FromArgb(47, 114, 214);
-        private static readonly Color Amber = Color.FromArgb(224, 158, 38);
-        private static readonly Color Slate = Color.FromArgb(92, 102, 114);
-
-        public static Image Get(string kind)
-        {
-            Image img;
-            if (_cache.TryGetValue(kind, out img)) return img;
-            try { img = Draw(kind); }
-            catch { img = null; }
-            _cache[kind] = img;
-            return img;
-        }
-
-        private static Image Draw(string kind)
-        {
-            Bitmap bmp = new Bitmap(16, 16,
-                System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-            using (Graphics g = Graphics.FromImage(bmp))
-            {
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                g.Clear(Color.Transparent);
-                switch (kind)
-                {
-                    case "block":     Badge(g, Red);   Lock(g, Red);       break;
-                    case "unblock":   Badge(g, Green); Check(g);           break;
-                    case "add":       Badge(g, Green); Plus(g, true);      break;
-                    case "remove":    Badge(g, Red);   Plus(g, false);     break;
-                    case "export":    Badge(g, Blue);  Arrow(g, true);     break;
-                    case "import":    Badge(g, Blue);  Arrow(g, false);    break;
-                    case "view":      Badge(g, Blue);  Lines(g);           break;
-                    case "journal":   Badge(g, Amber); Document(g, Amber); break;
-                    case "install":   Badge(g, Green); Gear(g);            break;
-                    case "svcrm":     Badge(g, Red);   Cross(g);           break;
-                    case "uninstall": Badge(g, Red);   Trash(g, Red);      break;
-                    case "password":  Badge(g, Amber); Key(g);             break;
-                    case "language":  Badge(g, Blue);  Globe(g);           break;
-                    case "exit":      Badge(g, Slate); Power(g);           break;
-                }
-            }
-            return bmp;
-        }
-
-        private static void Badge(Graphics g, Color c)
-        {
-            using (SolidBrush b = new SolidBrush(c))
-                g.FillEllipse(b, 1f, 1f, 14f, 14f);
-            using (Pen p = new Pen(Color.FromArgb(45, 0, 0, 0), 1f))
-                g.DrawEllipse(p, 1.25f, 1.25f, 13.5f, 13.5f);
-        }
-
-        private static Pen White(float w)
-        {
-            Pen p = new Pen(Color.White, w);
-            p.StartCap = LineCap.Round;
-            p.EndCap = LineCap.Round;
-            p.LineJoin = LineJoin.Round;
-            return p;
-        }
-
-        private static void Plus(Graphics g, bool plus)
-        {
-            using (Pen p = White(1.9f))
-            {
-                g.DrawLine(p, 5.4f, 8f, 10.6f, 8f);
-                if (plus) g.DrawLine(p, 8f, 5.4f, 8f, 10.6f);
-            }
-        }
-
-        private static void Check(Graphics g)
-        {
-            using (Pen p = White(1.9f))
-                g.DrawLines(p, new PointF[] {
-                    new PointF(5.2f, 8.2f),
-                    new PointF(7.2f, 10.1f),
-                    new PointF(10.8f, 5.9f) });
-        }
-
-        private static void Cross(Graphics g)
-        {
-            using (Pen p = White(1.9f))
-            {
-                g.DrawLine(p, 5.8f, 5.8f, 10.2f, 10.2f);
-                g.DrawLine(p, 10.2f, 5.8f, 5.8f, 10.2f);
-            }
-        }
-
-        private static void Arrow(Graphics g, bool up)
-        {
-            using (Pen p = White(1.9f))
-            {
-                if (up)
-                {
-                    g.DrawLine(p, 8f, 11f, 8f, 5.2f);
-                    g.DrawLines(p, new PointF[] {
-                        new PointF(5.7f, 7.4f),
-                        new PointF(8f, 5.1f),
-                        new PointF(10.3f, 7.4f) });
-                }
-                else
-                {
-                    g.DrawLine(p, 8f, 5f, 8f, 10.8f);
-                    g.DrawLines(p, new PointF[] {
-                        new PointF(5.7f, 8.6f),
-                        new PointF(8f, 10.9f),
-                        new PointF(10.3f, 8.6f) });
-                }
-            }
-        }
-
-        private static void Lines(Graphics g)
-        {
-            using (Pen p = White(1.6f))
-            {
-                g.DrawLine(p, 5.2f, 5.8f, 10.8f, 5.8f);
-                g.DrawLine(p, 5.2f, 8f, 10.8f, 8f);
-                g.DrawLine(p, 5.2f, 10.2f, 9f, 10.2f);
-            }
-        }
-
-        private static void Lock(Graphics g, Color badge)
-        {
-            using (Pen p = White(1.5f))
-                g.DrawArc(p, 5.3f, 4.4f, 5.4f, 5.4f, 180, 180);
-            using (SolidBrush b = new SolidBrush(Color.White))
-                g.FillRectangle(b, 5.3f, 7.6f, 5.4f, 4.3f);
-            using (SolidBrush b = new SolidBrush(badge))
-            {
-                g.FillEllipse(b, 7.2f, 8.7f, 1.6f, 1.6f);
-                g.FillRectangle(b, 7.7f, 9.6f, 0.6f, 1.2f);
-            }
-        }
-
-        private static void Document(Graphics g, Color badge)
-        {
-            using (SolidBrush b = new SolidBrush(Color.White))
-                g.FillRectangle(b, 5.2f, 4.4f, 5.6f, 7.2f);
-            using (Pen p = new Pen(badge, 1.1f))
-            {
-                g.DrawLine(p, 6.4f, 6.4f, 9.6f, 6.4f);
-                g.DrawLine(p, 6.4f, 8f, 9.6f, 8f);
-                g.DrawLine(p, 6.4f, 9.6f, 8.8f, 9.6f);
-            }
-        }
-
-        private static void Gear(Graphics g)
-        {
-            using (Pen p = White(1.5f))
-            {
-                g.DrawEllipse(p, 6.2f, 6.2f, 3.6f, 3.6f);
-                for (int i = 0; i < 8; i++)
-                {
-                    double a = Math.PI * i / 4.0;
-                    float x1 = (float)(8 + Math.Cos(a) * 2.9);
-                    float y1 = (float)(8 + Math.Sin(a) * 2.9);
-                    float x2 = (float)(8 + Math.Cos(a) * 4.3);
-                    float y2 = (float)(8 + Math.Sin(a) * 4.3);
-                    g.DrawLine(p, x1, y1, x2, y2);
-                }
-            }
-        }
-
-        private static void Trash(Graphics g, Color badge)
-        {
-            using (Pen p = White(1.5f))
-            {
-                g.DrawLine(p, 5.4f, 5.6f, 10.6f, 5.6f);
-                g.DrawLine(p, 6.8f, 4.4f, 9.2f, 4.4f);
-                g.DrawLines(p, new PointF[] {
-                    new PointF(6f, 5.6f),
-                    new PointF(6.6f, 11.2f),
-                    new PointF(9.4f, 11.2f),
-                    new PointF(10f, 5.6f) });
-            }
-            using (Pen p = new Pen(badge, 1.1f))
-            {
-                g.DrawLine(p, 7.5f, 7f, 7.5f, 9.9f);
-                g.DrawLine(p, 8.5f, 7f, 8.5f, 9.9f);
-            }
-        }
-
-        private static void Key(Graphics g)
-        {
-            using (Pen p = White(1.5f))
-            {
-                g.DrawEllipse(p, 5.1f, 4.9f, 3.3f, 3.3f);
-                g.DrawLine(p, 8f, 8f, 11.2f, 11.2f);
-                g.DrawLine(p, 9.7f, 9.7f, 10.6f, 8.8f);
-                g.DrawLine(p, 10.4f, 10.4f, 11.3f, 9.5f);
-            }
-        }
-
-        private static void Globe(Graphics g)
-        {
-            using (Pen p = White(1.4f))
-            {
-                g.DrawEllipse(p, 4.2f, 4.2f, 7.6f, 7.6f);
-                g.DrawLine(p, 4.2f, 8f, 11.8f, 8f);
-                g.DrawEllipse(p, 6.6f, 4.2f, 2.8f, 7.6f);
-            }
-        }
-
-        private static void Power(Graphics g)
-        {
-            using (Pen p = White(1.7f))
-            {
-                g.DrawArc(p, 4.7f, 4.7f, 6.6f, 6.6f, 135, 270);
-                g.DrawLine(p, 8f, 4.2f, 8f, 7.8f);
-            }
         }
     }
 
@@ -11977,5 +12690,7 @@ foreach (string path in oldFiles.Keys)
             }
             return sb.ToString();
         }
-    }
-}
+    
+
+}
+}

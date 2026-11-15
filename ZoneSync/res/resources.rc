@@ -1,0 +1,35 @@
+// =====================================================================
+// Zone Sync - ресурси: іконка + VERSIONINFO.
+// Версія: при кожній збірці змінюється тут (FILEVERSION/FileVersion/
+// ProductVersion) І в src/zone_sync.cpp (APP_VERSION) - конвенція.
+// =====================================================================
+#include <windows.h>
+
+1 ICON "sync.ico"
+
+1 VERSIONINFO
+FILEVERSION 1,0,2,0
+PRODUCTVERSION 1,0,0,1
+FILEOS 0x40004      // VOS_NT_WINDOWS32
+FILETYPE 0x1        // VFT_APP
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName",      "ZoneSync"
+      VALUE "FileDescription",  "Zone Sync"
+      VALUE "FileVersion",      "1.0.2.0"
+      VALUE "InternalName",     "zone_sync"
+      VALUE "OriginalFilename", "zone_sync.exe"
+      VALUE "ProductName",      "Zone Sync"
+      VALUE "ProductVersion",   "1.0.2.0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
+
+1 24 "zone_sync.manifest"

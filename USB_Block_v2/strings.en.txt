@@ -29,12 +29,12 @@
   8 Видалити службу\n	  8 Remove service\n
   9 Видалити застосунок	  9 Remove application
   <немає лога - показ ще не запускався>	  <no log - the display has not run yet>
-  «НІ»        - додати до поточного whitelist (об'єднати)	  "NO"        - add to the current whitelist (merge)
-  «НІ»        - підтвердити кодовим словом (якщо пароль забуто)	  "NO"        - confirm with the code word (if the password is forgotten)
-  «ВІДМІНА» - нічого не робити	  "CANCEL" - do nothing
-  «ВІДМІНА» - скасувати	  "CANCEL" - cancel
-  «ТАК»       - перезаписати (замінити) поточний whitelist	  "YES"       - overwrite (replace) the current whitelist
-  «ТАК»       - підтвердити поточним паролем	  "YES"       - confirm with the current password
+  «Ні»        - додати до поточного whitelist (об'єднати)	  "No"        - add to the current whitelist (merge)
+  «Ні»        - підтвердити кодовим словом (якщо пароль забуто)	  "No"        - confirm with the code word (if the password is forgotten)
+  «Скасувати» - нічого не робити	  "Cancel" - do nothing
+  «Скасувати» - скасувати	  "Cancel" - cancel
+  «Так»       - перезаписати (замінити) поточний whitelist	  "Yes"       - overwrite (replace) the current whitelist
+  «Так»       - підтвердити поточним паролем	  "Yes"       - confirm with the current password
   Ім'я пристрою: 	  Device name: 
   Додано: 	  Added: 
   Модель пристрою: 	  Device model: 
@@ -74,7 +74,7 @@
  файлів по 	 files of 
  хв тому	 min ago
  і 	 and 
-(«НІ» - повернутися до вибору комбінації)	("NO" - return to the combination selection)
+(«Ні» - повернутися до вибору комбінації)	("No" - return to the combination selection)
 (без вмісту файлів і без імені користувача).\n	(without file contents and without the user name).\n
 (без мітки)	(no label)
 (без імені)	(no name)
@@ -102,11 +102,11 @@
 . Усі USB-накопичувачі доступні.	. All USB drives are allowed.
 0 Переглянути WHITELIST...	0 View WHITELIST...
 1 Блокувати пристрої	1 Block devices
-Ім'я пристрою	Device name
+1. Ім'я Пристрою	1. Device Name
 2 Розблокувати пристрої	2 Unblock devices
-USB-ідентифікатор	USB identifier
+2. Тип Пристрою (ID):	2. Device Type (ID):
 3 Додати пристрій	3 Add device
-Модель пристрою	Device model
+3. Модель Пристрою (Vendor ID):	3. Device Model (Vendor ID):
 4 Видалити пристрій із WHITELIST...	4 Remove device from WHITELIST...
 5 Експортувати WHITELIST...	5 Export WHITELIST...
 6 Імпортувати WHITELIST...	6 Import WHITELIST...
@@ -126,7 +126,7 @@ WHITELIST експортовано:\n	WHITELIST exported:\n
 WHITELIST замінено: 	WHITELIST replaced: 
 WHITELIST об'єднано:\n	WHITELIST merged:\n
 WHITELIST порожній - видаляти нічого.	WHITELIST is empty - nothing to remove.
-«НІ» - лишити попередній пароль.	"NO" - keep the previous password.
+«Ні» - лишити попередній пароль.	"No" - keep the previous password.
 Імпорт WHITELIST	Import WHITELIST
 Імпортовано записів (пристроїв): 	Imported entries (devices): 
 Адміністратор: 	Administrator: 
@@ -145,9 +145,6 @@ WHITELIST порожній - видаляти нічого.	WHITELIST is empty -
 Введіть пароль для доступу до цього пункту меню:	Enter the password to access this menu item:
 Введіть пароль.	Enter the password.
 Введіть поточний пароль:	Enter the current password:
-Введіть ім'я пристрою - порожнє ім'я не дозволено.	Enter a device name - an empty name is not allowed.
-Пристрій з таким ім'ям уже є в whitelist.	A device with this name already exists in the whitelist.
-Введіть інше ім'я.	Enter a different name.
 Веде журнал: 	Journal kept by: 
 Виберіть USB-накопичувач:	Select a USB drive:
 Виберіть пристрій для видалення з WHITELIST:\n	Select a device to remove from WHITELIST:\n
@@ -168,7 +165,6 @@ WHITELIST порожній - видаляти нічого.	WHITELIST is empty -
 Відкрити файл журналу	Open the journal file
 Відкрити файл...	Open file...
 Джерело журналу подій (	Event log source (
-Для пристрою знайдено мітку тому:	A volume label was found for this device:
 До журналу	To journal
 Додайте основну клавішу (наприклад Ctrl+Alt+U).	Add the main key (for example Ctrl+Alt+U).
 Додано пристроїв: 	Devices added: 
@@ -206,7 +202,6 @@ WHITELIST порожній - видаляти нічого.	WHITELIST is empty -
 Задача сповіщувача (--notify): 	Notifier task (--notify): 
 Задача трея (--logon): 	Tray task (--logon): 
 Закрити	Close
-Залишити її як ім'я пристрою в whitelist?	Keep it as the device name in the whitelist?
 Запам'ятайте пароль: він зберігається лише у вигляді хеша.	Remember the password: it is stored only as a hash.
 Запис у чергу (HKLM\\SOFTWARE\\USB_Block\\Events): 	Queue write (HKLM\\SOFTWARE\\USB_Block\\Events): 
 Записуються: скопійовані, змінені, видалені\n	Recorded: copied, changed, deleted\n
@@ -254,7 +249,7 @@ WHITELIST порожній - видаляти нічого.	WHITELIST is empty -
 Невірне кодове слово.\nЗалишилося спроб: 	Invalid code word.\nAttempts left: 
 Невірний пароль.\nЗалишилося спроб: 	Invalid password.\nAttempts left: 
 Немає USB-накопичувачів.\n	No USB drives.\n
-USB-пристрій	USB device
+Новий Пристрій	New Device
 Новий пароль:	New password:
 ОК	OK
 Оновити	Refresh
@@ -306,13 +301,8 @@ USB-пристрій	USB device
 Підключіть накопичувач і повторіть.	Connect a drive and try again.
 Після видалення пункти 2, 3, 4, 6, 8, 9 будуть	After removal, items 2, 3, 4, 6, 8, 9 will be
 Розмір кільця кожного журналу: 	Ring size of each journal: 
-СЛУЖБА	SERVICE
 СТАТУС: 	STATUS: 
 Скасувати	Cancel
-ТАК	YES
-ТАК - залишити мітку, НІ - ввести власну назву.	YES - keep the label, NO - enter your own name.
-НІ	NO
-ВІДМІНА	CANCEL
 Служба моніторингу: 	Monitoring service: 
 Службові записи	Service records
 Службу встановлено, але не вдалося налаштувати значок у треї\n	The service was installed, but the tray icon could not be configured\n
@@ -448,3 +438,16 @@ USB-блокування: контроль роботи служби моніт�
 (автоперезапуск і задачі відновлено).	(auto-restart and tasks have been restored).
 Службу вже встановлено, але частину налаштувань\n	The service is already installed, but some settings\n
 відновити не вдалося:\n	could not be restored:\n
+USB-пристрій	USB device
+Введіть ім'я пристрою - порожнє ім'я не дозволено.	Enter the device name - an empty name is not allowed.
+Пристрій з таким ім'ям уже є в whitelist.\n	A device with this name is already in the whitelist.\n
+Введіть інше ім'я.	Enter another name.
+Для пристрою знайдено мітку тому:	A volume label was found for the device:
+»
+	"
+Залишити її як ім'я пристрою в whitelist?\n	Keep it as the device name in the whitelist?\n
+ТАК - залишити мітку, НІ - ввести власну назву.	YES - keep the label, NO - enter your own name.
+»\n\n	"\n\n
+Ім'я пристрою	Device name
+USB-ідентифікатор	USB identifier
+Модель пристрою	Device model
