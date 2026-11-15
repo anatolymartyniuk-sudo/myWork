@@ -24,7 +24,7 @@
 #include <map>
 #include <algorithm>
 
-static const wchar_t* APP_VERSION = L"1.0.2.0";
+static const wchar_t* APP_VERSION = L"1.0.2.1";
 
 // ---------------------------------------------------------------------
 // Константи.
@@ -84,7 +84,8 @@ enum StrId {
     S_CONFIG_EMPTY, S_ADD_FILE_TITLE, S_ADD_FOLDER_TITLE,
     S_REMOVE_FILE_TITLE, S_MUST_BE_IN_LOCAL, S_TYPE_FOLDER,
     S_ERROR, S_LANG_APPLIED, S_COPIED_TO_INSTALL,
-    S_UPDATE_AVAILABLE, S_UPDATE_INSTALL, S_UPDATE_FAIL
+    S_UPDATE_AVAILABLE, S_UPDATE_INSTALL, S_UPDATE_FAIL,
+    S_CHOOSE_FLASH_PLACE, S_NO_FLASH_PLACE
 };
 
 struct Str { const wchar_t* ua; const wchar_t* en; };
@@ -140,6 +141,10 @@ static const Str STRINGS[] = {
     { L"Доступна нова версія: {}",       L"New version available: {}" },
     { L"Встановити оновлення до ",       L"Install update to " },
     { L"Не вдалося встановити оновлення.", L"Failed to install the update." },
+    { L"Виберіть місце на флешці для '{}'\n(Enter/ОК - корінь флешки)",
+                                          L"Choose the flash location for '{}'\n(OK - flash root)" },
+    { L"Флешка не підключена - розташування на флешці: корінь (змінюється у files.txt)",
+                                          L"Flash drive not connected - flash location: root (edit in files.txt)" },
 };
 static const int STR_COUNT = (int)(sizeof(STRINGS) / sizeof(STRINGS[0]));
 
@@ -546,7 +551,27 @@ static void SyncFileItem(const SyncItem& item, bool dry,
         std::wstring flash = roots[ri] + item.flashName;
         bool flashExists = false;
         ULARGE_INTEGER ft = FileTimeOf(flash, &flashExists);
-        if (!flashExists) continue;   // на цій флешці файлу немає
+        if (!flashExists) {
+            // Файлу на флешці немає: розміщуємо локальний (вибране місце
+            // на флешці може містити підтапки).
+            if (!localExists) continue;
+            WriteLog(item.flashName + L": " + S(S_DIRECTION_LF));
+            WriteLog(L"  " + S(S_MODIFIED) + L": " + local);
+            if (dry) continue;
+            if (IsFileLocked(local, false)) {
+                WriteLog(L"  " + S(S_FILE_LOCKED));
+                if (firstError->empty()) *firstError = S(S_FILE_LOCKED);
+                continue;
+            }
+            CreateParentDirs(flash);
+            if (CopyFileW(local.c_str(), flash.c_str(), FALSE)) {
+                WriteLog(L"  " + S(S_COPIED));
+                done->push_back(S(S_DIRECTION_LF));
+            } else if (firstError->empty()) {
+                *firstError = S(S_COPY_FAILED);
+            }
+            continue;
+        }
 
         double diff = (double)((long long)ft.QuadPart - (long long)lt.QuadPart) / 10000000.0;
         if (diff < 0) diff = -diff;
@@ -590,6 +615,7 @@ static void SyncFileItem(const SyncItem& item, bool dry,
             WriteLog(L"  " + S(S_BACKUP) + L": " + bak);
         }
 
+        CreateParentDirs(dst);
         if (CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
             WriteLog(L"  " + S(S_COPIED));
             done->push_back(dirText);
@@ -1159,6 +1185,41 @@ static bool PickFolder(HWND owner, std::wstring& out)
     return ok;
 }
 
+// Вибір місця НА флешці: огляд починається з кореня першої знімної
+// флешки. Повертає ВІДНОСНИЙ шлях (без диска); "" = корінь флешки.
+static bool PickFlashRelative(HWND owner, const std::wstring& itemName,
+                              std::wstring& relOut)
+{
+    std::vector<std::wstring> roots = GetRemovableRoots();
+    if (roots.empty()) return false;   // флешка не підключена
+    wchar_t root[4] = { roots[0][0], L':', L'\\', 0 };
+
+    PIDLIST_ABSOLUTE rootPidl = nullptr;
+    if (SHParseDisplayName(root, nullptr, &rootPidl, 0, nullptr) != S_OK || !rootPidl)
+        return false;
+
+    BROWSEINFOW bi = { 0 };
+    bi.hwndOwner = owner;
+    bi.pidlRoot = rootPidl;
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_EDITBOX;
+    bi.lpszTitle = Format1(S(S_CHOOSE_FLASH_PLACE), itemName).c_str();
+    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+    CoTaskMemFree(rootPidl);
+    if (!pidl) return false;
+    wchar_t path[MAX_PATH] = { 0 };
+    bool ok = SHGetPathFromIDListW(pidl, path) != 0;
+    CoTaskMemFree(pidl);
+    if (!ok) return false;
+
+    // Обрізаємо корінь диска: "F:\backup" -> "backup"; корінь -> "".
+    std::wstring p = path;
+    if (_wcsnicmp(p.c_str(), root, 3) == 0) p = p.substr(3);
+    while (!p.empty() && p[0] == L'\\') p = p.substr(1);
+    while (!p.empty() && p[p.size() - 1] == L'\\') p = p.substr(0, p.size() - 1);
+    relOut = p;
+    return true;
+}
+
 // ---------------------------------------------------------------------
 // Вікно.
 // ---------------------------------------------------------------------
@@ -1220,31 +1281,46 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             of.lpstrTitle = S(S_ADD_FILE_TITLE).c_str();
             if (GetOpenFileNameW(&of)) {
                 std::wstring localPath = file;
-                std::wstring flashName = localPath;
-                size_t slash = flashName.find_last_of(L'\\');
-                if (slash != std::wstring::npos) flashName = flashName.substr(slash + 1);
+                std::wstring leaf = localPath;
+                size_t slash = leaf.find_last_of(L'\\');
+                if (slash != std::wstring::npos) leaf = leaf.substr(slash + 1);
                 if (ItemInList(L'F', localPath)) {
                     ShowBalloon(S(S_ALREADY_IN_LIST), true);
-                } else {
-                    AddItemToList(L'F', localPath, flashName);
-                    WriteLog(S(S_ADDED) + L": " + localPath);
-                    ShowBalloon(S(S_ADDED) + L": " + flashName, false);
+                    return 0;
                 }
+                // Місце на флешці: браузер з кореня флешки (якщо підключена).
+                std::wstring relDir;
+                bool placePicked = PickFlashRelative(hwnd, leaf, relDir);
+                std::wstring flashName = relDir.empty()
+                    ? leaf : relDir + L"\\" + leaf;
+                AddItemToList(L'F', localPath, flashName);
+                std::wstring note = placePicked
+                    ? L"" : L"\n" + S(S_NO_FLASH_PLACE);
+                WriteLog(S(S_ADDED) + L": " + localPath + L"  →  " + flashName);
+                ShowBalloon(S(S_ADDED) + L": " + flashName, false);
+                if (!placePicked) ShowBalloon(S(S_NO_FLASH_PLACE), true);
             }
         } else if (id == IDM_ADD_FOLDER) {
             std::wstring localPath;
             if (!PickFolder(hwnd, localPath)) return 0;
-            std::wstring flashName = localPath;
-            size_t slash = flashName.find_last_of(L'\\');
-            if (slash != std::wstring::npos) flashName = flashName.substr(slash + 1);
-            if (flashName.empty()) return 0;
-            if (!ItemInList(L'D', localPath)) {
-                AddItemToList(L'D', localPath, flashName);
-                WriteLog(S(S_ADDED) + L": [папка] " + localPath);
-                ShowBalloon(S(S_ADDED) + L": " + flashName, false);
-            } else {
+            std::wstring leaf = localPath;
+            size_t slash = leaf.find_last_of(L'\\');
+            if (slash != std::wstring::npos) leaf = leaf.substr(slash + 1);
+            if (leaf.empty()) return 0;
+            if (ItemInList(L'D', localPath)) {
                 ShowBalloon(S(S_ALREADY_IN_LIST), true);
+                return 0;
             }
+            // Місце на флешці для папки.
+            std::wstring relDir;
+            bool placePicked = PickFlashRelative(hwnd, leaf, relDir);
+            std::wstring flashName = relDir.empty()
+                ? leaf : relDir + L"\\" + leaf;
+            AddItemToList(L'D', localPath, flashName);
+            std::wstring note = placePicked ? L"" : L"\n" + S(S_NO_FLASH_PLACE);
+            WriteLog(S(S_ADDED) + L": [папка] " + localPath + L"  →  " + flashName);
+            ShowBalloon(S(S_ADDED) + L": " + flashName, false);
+            if (!placePicked) ShowBalloon(S(S_NO_FLASH_PLACE), true);
         } else if (id == IDM_EDIT_LIST) {
             std::wstring hint = Format1(S(S_EDIT_LIST_HINT), g_configPath);
             MessageBoxW(hwnd, hint.c_str(), APP_TITLE, MB_OK | MB_ICONINFORMATION);
