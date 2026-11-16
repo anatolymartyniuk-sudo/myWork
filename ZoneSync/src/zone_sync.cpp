@@ -24,7 +24,7 @@
 #include <map>
 #include <algorithm>
 
-static const wchar_t* APP_VERSION = L"1.0.4.1";
+static const wchar_t* APP_VERSION = L"1.0.7.0";
 
 // ---------------------------------------------------------------------
 // Константи.
@@ -60,6 +60,10 @@ enum {
     IDM_ADD_FOLDER  = 1011,
     IDM_EDIT_LIST   = 1012,
     IDM_UPDATE      = 1013,
+    IDM_ADD_BACKUP  = 1014,
+    IDM_SHOW_BAK_LOG = 1015,
+    IDM_SYNC_BACKUP_NOW = 1016,
+    IDM_BAK_REMOVE_BASE = 4000,   // + індекс у списку бекапів
     IDM_REMOVE_BASE = 2000,   // + індекс у списку
     IDM_SHOW_LOG    = 1004,
     IDM_LANGUAGE    = 1005,
@@ -87,7 +91,10 @@ enum StrId {
     S_UPDATE_AVAILABLE, S_UPDATE_INSTALL, S_UPDATE_FAIL,
     S_CHOOSE_FLASH_PLACE, S_NO_FLASH_PLACE, S_STORED_UNTIL, S_BACKUP_CREATED,
     S_DELETED_SYNC, S_DELETE_FAILED, S_CLOSE, S_CLOSE_IN,
-    S_CONFLICT, S_SIDE_PC, S_SIDE_FLASH
+    S_CONFLICT, S_SIDE_PC, S_SIDE_FLASH,
+    S_ADD_BACKUP, S_BACKUP_SRC_TITLE, S_BACKUP_DST_TITLE, S_TYPE_BACKUP,
+    S_BACKUP_UPDATED, S_UPDATE_ASK, S_BAK_HEADER, S_SHOW_BAK_LOG,
+    S_YES, S_NO, S_BACKUP_NOW, S_NO_BACKUPS
 };
 
 struct Str { const wchar_t* ua; const wchar_t* en; };
@@ -156,6 +163,21 @@ static const Str STRINGS[] = {
     { L"Конфлікт файлів",                 L"File conflict" },
     { L"ПК",                              L"PC" },
     { L"флешка",                          L"flash drive" },
+    { L"Додати бекап…",                   L"Add backup…" },
+    { L"Оберіть ПАПКУ-ДЖЕРЕЛО для бекапу",
+                                          L"Choose the backup SOURCE folder" },
+    { L"Оберіть місце бекапу: диск або мережа (\\\\сервер\\папка)",
+                                          L"Choose backup destination: disk or network (\\\\server\\share)" },
+    { L"(бекап)",                         L"(backup)" },
+    { L"Бекап: оновлено {}",              L"Backup: {} updated" },
+    { L"Доступна нова версія {}.\nВстановити зараз?",
+                                          L"New version {} available.\nInstall now?" },
+    { L"Бекап",                           L"Backup" },
+    { L"Показати лог бекапу",             L"Show backup log" },
+    { L"Так",                             L"Yes" },
+    { L"Ні",                              L"No" },
+    { L"Створити бекап",                  L"Create backup" },
+    { L"Бекапи ще не налаштовані",        L"No backups configured yet" },
 };
 static const int STR_COUNT = (int)(sizeof(STRINGS) / sizeof(STRINGS[0]));
 
@@ -244,6 +266,9 @@ static std::wstring ConflictStamp()
 // ---------------------------------------------------------------------
 static std::wstring g_configPath;   // %APPDATA%\ZoneSync\files.txt
 static std::wstring g_logPath;      // %APPDATA%\ZoneSync\zone_sync.log
+static std::wstring g_bakLogPath;       // %APPDATA%\ZoneSync\zone_backup.log
+static std::wstring g_backupConfigPath; // %APPDATA%\ZoneSync\backups.txt
+static std::vector<std::string> g_backupExtra; // B-рядки з files.txt (міграція)
 static std::wstring g_installPath;  // Program Files\Zone_Sync\zone_sync.exe
 static std::wstring g_backupDir;    // Program Files\Zone_Sync\BackUP
 static std::wstring g_progDataDir;  // %ProgramData%\ZoneSync
@@ -252,9 +277,12 @@ static bool g_bakFallback = false;  // true - бекапы в %ProgramData%
 static HWND  g_hwnd = nullptr;
 static bool  g_trayAdded = false;
 
-// Елемент синхронізації: 'F' файл / 'D' папка (Directory).
-struct SyncItem { wchar_t type; std::wstring localPath; std::wstring flashName; };
+// Елемент синхронізації: 'F' файл / 'D' папка (Directory) / 'B' бекап.
+// vol - серійний номер знімного тому, до якого прив'язана ВІДНОСНА
+// друга сторона (0 - ще не прив'язана; абсолютні сторони не потребують).
+struct SyncItem { wchar_t type; std::wstring localPath; std::wstring flashName; DWORD vol; DWORD volDst; };
 static std::vector<SyncItem> g_items;
+static std::vector<SyncItem> g_backupItems;   // окремий список бекапів
 
 // ---------------------------------------------------------------------
 // Шляхи, мова.
@@ -310,8 +338,47 @@ static void InitPaths()
     // екземпляра (лог у Program Files писали лише адмін-екземпляри, звичайний
     // трей писав у фолбэк %ProgramData% - звідси плутанина "де лог").
     g_logPath = cfgDir + L"\\" + LOG_NAME;
+    g_bakLogPath = cfgDir + L"\\zone_backup.log";   // окремий лог бекапів
+    g_backupConfigPath = cfgDir + L"\\backups.txt"; // окремий список бекапів
     g_backupDir = g_installPath.substr(0, g_installPath.find_last_of(L"\\")) + L"\\BackUP";
     CreateDirectoryW(g_backupDir.c_str(), nullptr);
+
+    // Разова міграція: пари "B|..." зі старого files.txt -> backups.txt.
+    HANDLE mf = CreateFileW(g_configPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                            nullptr, OPEN_EXISTING, 0, nullptr);
+    if (mf != INVALID_HANDLE_VALUE) {
+        std::string mdata;
+        char mbuf[4096]; DWORD mgot = 0;
+        while (ReadFile(mf, mbuf, sizeof(mbuf), &mgot, nullptr) && mgot > 0)
+            mdata.append(mbuf, mgot);
+        CloseHandle(mf);
+        bool hasB = false;
+        std::string keep = "\xEF\xBB\xBF";
+        size_t mp = 0;
+        while (mp <= mdata.size()) {
+            size_t nl = mdata.find('\n', mp);
+            std::string line = mdata.substr(mp, (nl == std::string::npos ? mdata.size() : nl) - mp);
+            std::string core = line;
+            if (!core.empty() && core[core.size() - 1] == '\r') core.erase(core.size() - 1);
+            if (core.size() > 2 && core[0] == 'B' && core[1] == '|') {
+                hasB = true;
+                g_backupExtra.push_back(core + "\r\n");
+            } else {
+                keep += core + "\r\n";
+            }
+            if (nl == std::string::npos) break;
+            mp = nl + 1;
+        }
+        if (hasB) {
+            HANDLE wf = CreateFileW(g_configPath.c_str(), GENERIC_WRITE, 0,
+                                    nullptr, CREATE_ALWAYS, 0, nullptr);
+            if (wf != INVALID_HANDLE_VALUE) {
+                DWORD w = 0;
+                WriteFile(wf, keep.c_str(), (DWORD)keep.size(), &w, nullptr);
+                CloseHandle(wf);
+            }
+        }
+    }
 }
 
 static void LoadLang()
@@ -357,16 +424,23 @@ static void LoadItems()
         std::string line = data.substr(pos, (nl == std::string::npos ? data.size() : nl) - pos);
         std::wstring w = Trim(Utf8ToWide(line));
         if (!w.empty() && w[0] != L'#') {
-            SyncItem it;
-            // Формат: "F|локальний шлях|ім'я на флешці".
+            SyncItem it; it.vol = 0; it.volDst = 0;
+            // Формат: "F|локальний шлях|ім'я на флешці[|серійний № тому]".
             // Старий формат "F|ім'я" -> шлях з LOG_DIR (міграція).
             size_t p1 = w.find(L'|');
-            if (p1 != std::wstring::npos && (w[0] == L'F' || w[0] == L'D')) {
+            if (p1 != std::wstring::npos &&
+                (w[0] == L'F' || w[0] == L'D' || w[0] == L'B')) {
                 it.type = w[0];
                 size_t p2 = w.find(L'|', p1 + 1);
                 if (p2 != std::wstring::npos) {
                     it.localPath = w.substr(p1 + 1, p2 - p1 - 1);
-                    it.flashName = w.substr(p2 + 1);
+                    size_t p3 = w.find(L'|', p2 + 1);
+                    if (p3 != std::wstring::npos) {
+                        it.flashName = w.substr(p2 + 1, p3 - p2 - 1);
+                        it.vol = (DWORD)wcstoul(w.substr(p3 + 1).c_str(), nullptr, 10);
+                    } else {
+                        it.flashName = w.substr(p2 + 1);
+                    }
                 } else {
                     std::wstring name = w.substr(p1 + 1);
                     it.localPath = std::wstring(LOG_DIR) + L"\\" + name;
@@ -390,10 +464,13 @@ static void SaveItems()
 {
     std::string data = "\xEF\xBB\xBF";
     for (size_t i = 0; i < g_items.size(); i++) {
-        data += (g_items[i].type == L'D' ? "D|" : "F|");
+        data += (g_items[i].type == L'D' ? "D|" : (g_items[i].type == L'B' ? "B|" : "F|"));
         data += WideToUtf8(g_items[i].localPath);
         data += "|";
         data += WideToUtf8(g_items[i].flashName);
+        char num[24];
+        sprintf(num, "|%lu", (unsigned long)g_items[i].vol);
+        data += num;
         data += "\r\n";
     }
     HANDLE f = CreateFileW(g_configPath.c_str(), GENERIC_WRITE, 0,
@@ -429,27 +506,139 @@ static void RemoveItemFromList(wchar_t type, const std::wstring& localPath)
 }
 
 static void AddItemToList(wchar_t type, const std::wstring& localPath,
-                          const std::wstring& flashName)
+                          const std::wstring& flashName, DWORD vol = 0)
 {
     if (ItemInList(type, localPath)) return;
-    SyncItem it; it.type = type; it.localPath = localPath; it.flashName = flashName;
+    SyncItem it; it.type = type; it.localPath = localPath;
+    it.flashName = flashName; it.vol = vol; it.volDst = 0;
     g_items.push_back(it);
     SaveItems();
 }
 
+// Список бекапів: окремий файл %APPDATA%\ZoneSync\backups.txt
+// (формат "B|джерело|приймач[|серійний № тому джерела]").
+static void SaveBackupItems();
+
+static void LoadBackupItems()
+{
+    g_backupItems.clear();
+    HANDLE f = CreateFileW(g_backupConfigPath.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    std::string data;
+    if (f != INVALID_HANDLE_VALUE) {
+        char buf[4096]; DWORD got = 0;
+        while (ReadFile(f, buf, sizeof(buf), &got, nullptr) && got > 0)
+            data.append(buf, got);
+        CloseHandle(f);
+    } else {
+        // Порожній файл створюємо одразу.
+        HANDLE wf = CreateFileW(g_backupConfigPath.c_str(), GENERIC_WRITE, 0,
+                                nullptr, CREATE_ALWAYS, 0, nullptr);
+        if (wf != INVALID_HANDLE_VALUE) {
+            DWORD w = 0;
+            WriteFile(wf, "\xEF\xBB\xBF", 3, &w, nullptr);
+            CloseHandle(wf);
+        }
+    }
+    // Разова міграція зі старого files.txt.
+    for (size_t i = 0; i < g_backupExtra.size(); i++)
+        data += g_backupExtra[i];
+    g_backupExtra.clear();
+    size_t pos = 0;
+    while (pos <= data.size()) {
+        size_t nl = data.find('\n', pos);
+        std::string line = data.substr(pos, (nl == std::string::npos ? data.size() : nl) - pos);
+        std::wstring w = Trim(Utf8ToWide(line));
+        if (!w.empty() && w[0] == L'B') {
+            SyncItem it; it.type = L'B'; it.vol = 0; it.volDst = 0;
+            size_t p1 = w.find(L'|');
+            size_t p2 = (p1 == std::wstring::npos) ? std::wstring::npos
+                        : w.find(L'|', p1 + 1);
+            if (p1 != std::wstring::npos && p2 != std::wstring::npos) {
+                it.localPath = w.substr(p1 + 1, p2 - p1 - 1);
+                size_t p3 = w.find(L'|', p2 + 1);
+                if (p3 != std::wstring::npos) {
+                    it.flashName = w.substr(p2 + 1, p3 - p2 - 1);
+                    size_t p4 = w.find(L'|', p3 + 1);
+                    it.vol = (DWORD)wcstoul(w.substr(p3 + 1,
+                        (p4 == std::wstring::npos ? w.size() : p4) - p3 - 1).c_str(),
+                        nullptr, 10);
+                    if (p4 != std::wstring::npos)
+                        it.volDst = (DWORD)wcstoul(w.substr(p4 + 1).c_str(), nullptr, 10);
+                } else {
+                    it.flashName = w.substr(p2 + 1);
+                }
+                if (!it.localPath.empty() && !it.flashName.empty()) {
+                    // Міграція старих записів: абсолютний шлях + серійник
+                    // -> відносний (буква диска більше не має значення).
+                    if (it.vol != 0 && IsAbsolutePath(it.localPath))
+                        it.localPath = it.localPath.substr(3);
+                    if (it.volDst != 0 && IsAbsolutePath(it.flashName))
+                        it.flashName = it.flashName.substr(3);
+                    g_backupItems.push_back(it);
+                }
+            }
+        }
+        if (nl == std::string::npos) break;
+        pos = nl + 1;
+    }
+    if (!data.empty()) SaveBackupItems();   // зафіксувати міграцію/формат
+}
+
+static void SaveBackupItems()
+{
+    std::string data = "\xEF\xBB\xBF";
+    for (size_t i = 0; i < g_backupItems.size(); i++) {
+        data += "B|" + WideToUtf8(g_backupItems[i].localPath) + "|" +
+                WideToUtf8(g_backupItems[i].flashName);
+        char num[48];
+        sprintf(num, "|%lu|%lu", (unsigned long)g_backupItems[i].vol,
+                (unsigned long)g_backupItems[i].volDst);
+        data += num;
+        data += "\r\n";
+    }
+    HANDLE f = CreateFileW(g_backupConfigPath.c_str(), GENERIC_WRITE, 0,
+                           nullptr, CREATE_ALWAYS, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) {
+        WriteLog(S(S_ERROR) + L": " + g_backupConfigPath + L" (save)");
+        return;
+    }
+    DWORD written = 0;
+    WriteFile(f, data.c_str(), (DWORD)data.size(), &written, nullptr);
+    CloseHandle(f);
+}
+
+static bool BackupInList(const std::wstring& src)
+{
+    for (size_t i = 0; i < g_backupItems.size(); i++)
+        if (_wcsicmp(g_backupItems[i].localPath.c_str(), src.c_str()) == 0) return true;
+    return false;
+}
+
+static void RemoveBackupFromList(const std::wstring& src)
+{
+    std::vector<SyncItem> out;
+    for (size_t i = 0; i < g_backupItems.size(); i++)
+        if (_wcsicmp(g_backupItems[i].localPath.c_str(), src.c_str()) != 0)
+            out.push_back(g_backupItems[i]);
+    g_backupItems = out;
+    SaveBackupItems();
+}
+
 // ---------------------------------------------------------------------
-// Лог (UTF-8, кільце ~100 КБ).
+// Лог (UTF-8, кільце ~100 КБ). Два файли: синхронізація -> zone_sync.log,
+// бекап -> zone_backup.log.
 // ---------------------------------------------------------------------
-static void WriteLog(const std::wstring& msg)
+static void WriteLogTo(const std::wstring& logPath, const std::wstring& msg)
 {
     std::string line = WideToUtf8(NowStamp() + L"  " + msg) + "\r\n";
-    HANDLE f = CreateFileW(g_logPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+    HANDLE f = CreateFileW(logPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
                            nullptr, OPEN_EXISTING, 0, nullptr);
     if (f != INVALID_HANDLE_VALUE) {
         DWORD hi = 0; DWORD lo = GetFileSize(f, &hi);
         CloseHandle(f);
         if (lo > (DWORD)LOG_MAX_BYTES) {
-            HANDLE rf = CreateFileW(g_logPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+            HANDLE rf = CreateFileW(logPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
                                     nullptr, OPEN_EXISTING, 0, nullptr);
             if (rf != INVALID_HANDLE_VALUE) {
                 std::string all;
@@ -464,7 +653,7 @@ static void WriteLog(const std::wstring& msg)
                     pos = nl; lines++;
                 }
                 std::string tail = all.substr(pos == 0 ? 0 : pos + 1);
-                HANDLE wf = CreateFileW(g_logPath.c_str(), GENERIC_WRITE, 0,
+                HANDLE wf = CreateFileW(logPath.c_str(), GENERIC_WRITE, 0,
                                         nullptr, CREATE_ALWAYS, 0, nullptr);
                 if (wf != INVALID_HANDLE_VALUE) {
                     DWORD w = 0;
@@ -474,7 +663,7 @@ static void WriteLog(const std::wstring& msg)
             }
         }
     }
-    HANDLE f2 = CreateFileW(g_logPath.c_str(), FILE_APPEND_DATA,
+    HANDLE f2 = CreateFileW(logPath.c_str(), FILE_APPEND_DATA,
                             FILE_SHARE_READ | FILE_SHARE_WRITE,
                             nullptr, OPEN_ALWAYS, 0, nullptr);
     if (f2 != INVALID_HANDLE_VALUE) {
@@ -486,7 +675,8 @@ static void WriteLog(const std::wstring& msg)
     }
     // Фолбэк: лог в %ProgramData%\ZoneSync\ (запись в Program Files не удалась).
     g_logFallback = true;
-    std::wstring altLog = g_progDataDir + L"\\zone_sync.log";
+    std::wstring altLog = g_progDataDir + L"\\" +
+        logPath.substr(logPath.find_last_of(L'\\') + 1);
     HANDLE f3 = CreateFileW(altLog.c_str(), FILE_APPEND_DATA,
                             FILE_SHARE_READ | FILE_SHARE_WRITE,
                             nullptr, OPEN_ALWAYS, 0, nullptr);
@@ -496,6 +686,16 @@ static void WriteLog(const std::wstring& msg)
         WriteFile(f3, line.c_str(), (DWORD)line.size(), &w, nullptr);
         CloseHandle(f3);
     }
+}
+
+static void WriteLog(const std::wstring& msg)
+{
+    WriteLogTo(g_logPath, msg);
+}
+
+static void WriteLogB(const std::wstring& msg)   // лог бекапу
+{
+    WriteLogTo(g_bakLogPath, msg);
 }
 
 // ---------------------------------------------------------------------
@@ -560,11 +760,14 @@ static std::wstring DeletionTimeText()
 
 // ---------------------------------------------------------------------
 // Знімки стану пар (для поширення видалень). %APPDATA%\ZoneSync\state\.
-// Файл на пару: 1-й рядок "T|тип|локальний шлях|друга сторона",
-// далі секції сторін: "S|шлях сторони" + "F|відносний шлях|lo|hi".
-// Для файлової пари відносний шлях - порожній ("").
 // ---------------------------------------------------------------------
-struct SideState { std::wstring path; std::map<std::wstring, ULARGE_INTEGER> files; };
+static DWORD VolumeSerialOf(const std::wstring& path);   // форвард
+
+struct SideState {
+    std::wstring path;
+    DWORD serial;   // серійний тому на момент знімка (0 - невідомо)
+    std::map<std::wstring, ULARGE_INTEGER> files;
+};
 struct PairState {
     wchar_t type = 0; std::wstring localPath, flashName;
     std::vector<SideState> sides;
@@ -604,13 +807,22 @@ static int FindSideIdx(PairState& ps, const std::wstring& path)
     return -1;
 }
 
-static int GetSideIdx(PairState& ps, const std::wstring& path)
+static int GetSideIdx(PairState& ps, const std::wstring& path, DWORD serial = 0)
 {
     int i = FindSideIdx(ps, path);
     if (i >= 0) return i;
-    SideState n; n.path = path;
+    SideState n; n.path = path; n.serial = serial;
     ps.sides.push_back(n);
     return (int)(ps.sides.size() - 1);
+}
+
+// Сторона знімка валідна лише якщо том збігається: інша фізична флешка
+// під тією ж буквою НЕ повинна виглядати як "все видалено".
+static bool SideValidForPath(const SideState& s, const std::wstring& path)
+{
+    DWORD cur = VolumeSerialOf(path);
+    if (s.serial == 0) return false;   // без серійника знімок недостовірний
+    return cur != 0 && s.serial == cur;
 }
 
 static bool LoadPairState(const SyncItem& it, PairState& ps)
@@ -644,7 +856,15 @@ static bool LoadPairState(const SyncItem& it, PairState& ps)
                     _wcsicmp(fn.c_str(), it.flashName.c_str()) != 0)
                     return false;
             } else if (w.rfind(L"S|", 0) == 0) {
-                cur = GetSideIdx(ps, w.substr(2));
+                // "S|шлях[|серійний № тому]".
+                std::wstring body = w.substr(2);
+                DWORD sn = 0;
+                size_t p = body.find(L'|');
+                if (p != std::wstring::npos) {
+                    sn = (DWORD)wcstoul(body.substr(p + 1).c_str(), nullptr, 10);
+                    body = body.substr(0, p);
+                }
+                cur = GetSideIdx(ps, body, sn);
             } else if (w.rfind(L"F|", 0) == 0 && cur >= 0) {
                 // Формат: "F|відносний шлях| час (100ns)". Для файлової
                 // пари відносний шлях порожній: "F||час".
@@ -669,7 +889,9 @@ static void SavePairState(const SyncItem& it, const PairState& ps)
     data += "T|" + std::string(1, it.type == L'D' ? 'D' : 'F') + "|" +
             WideToUtf8(it.localPath) + "|" + WideToUtf8(it.flashName) + "\r\n";
     for (size_t i = 0; i < ps.sides.size(); i++) {
-        data += "S|" + WideToUtf8(ps.sides[i].path) + "\r\n";
+        char sn[24];
+        sprintf(sn, "|%lu", (unsigned long)VolumeSerialOf(ps.sides[i].path));
+        data += "S|" + WideToUtf8(ps.sides[i].path) + sn + "\r\n";
         for (std::map<std::wstring, ULARGE_INTEGER>::const_iterator k = ps.sides[i].files.begin();
              k != ps.sides[i].files.end(); ++k) {
             char num[24];
@@ -898,6 +1120,17 @@ static void WalkTree(const std::wstring& root, const std::wstring& prefix,
     FindClose(h);
 }
 
+// Серійний номер тому для шляху з буквою диска (0 - не вдалося/UNC).
+static DWORD VolumeSerialOf(const std::wstring& path)
+{
+    if (path.size() < 2 || path[1] != L':') return 0;
+    wchar_t root[4] = { path[0], L':', L'\\', 0 };
+    DWORD sn = 0;
+    if (GetVolumeInformationW(root, nullptr, 0, &sn, nullptr, nullptr, nullptr, 0))
+        return sn;
+    return 0;
+}
+
 // Чи існує диск, на якому лежить шлях ("F:\..." -> диск F:).
 static bool DriveExists(const std::wstring& path)
 {
@@ -910,7 +1143,7 @@ static bool DriveExists(const std::wstring& path)
 // ---------------------------------------------------------------------
 // Синхронізація ОДНОГО файлу (не папка): локальний <-> кожна флешка.
 // ---------------------------------------------------------------------
-static void SyncFileItem(const SyncItem& item, bool dry,
+static void SyncFileItem(SyncItem& item, bool dry,
                          std::vector<std::wstring>* done,
                          std::vector<std::wstring>* backups,
                          std::wstring* firstError, int* identicalCount,
@@ -923,15 +1156,17 @@ static void SyncFileItem(const SyncItem& item, bool dry,
     bool localExists = false;
     ULARGE_INTEGER lt = FileTimeOf(local, &localExists);
 
-    // Друга сторона: абсолютний шлях -> одна ціль; відносний -> кожна
-    // підключена флешка.
+    // Друга сторона: абсолютний шлях -> одна ціль; відносний -> лише
+    // прив'язаний том (за серійним номером), поки не прив'язано - усі.
     std::vector<std::wstring> targets;
     if (IsAbsolutePath(item.flashName))
         targets.push_back(item.flashName);
     else {
         std::vector<std::wstring> roots = GetRemovableRoots();
-        for (size_t ri = 0; ri < roots.size(); ri++)
+        for (size_t ri = 0; ri < roots.size(); ri++) {
+            if (item.vol != 0 && VolumeSerialOf(roots[ri]) != item.vol) continue;
             targets.push_back(roots[ri] + item.flashName);
+        }
     }
 
     // Попередній стан сторін (для виявлення видалень). Локальний стан
@@ -940,7 +1175,7 @@ static void SyncFileItem(const SyncItem& item, bool dry,
     ULARGE_INTEGER prevLocalT; bool hadPrevLocal = false;
     if (!dry) {
         int i = FindSideIdx(*st, local);
-        if (i >= 0) {
+        if (i >= 0 && SideValidForPath(st->sides[i], local)) {
             std::map<std::wstring, ULARGE_INTEGER>::iterator f = st->sides[i].files.find(L"");
             if (f != st->sides[i].files.end()) { prevLocalT = f->second; hadPrevLocal = true; }
         }
@@ -955,7 +1190,7 @@ static void SyncFileItem(const SyncItem& item, bool dry,
         ULARGE_INTEGER prevTargetT; bool hadPrevTarget = false;
         if (!dry) {
             int gi = FindSideIdx(*st, flash);
-            if (gi >= 0) {
+            if (gi >= 0 && SideValidForPath(st->sides[gi], flash)) {
                 std::map<std::wstring, ULARGE_INTEGER>::iterator f = st->sides[gi].files.find(L"");
                 if (f != st->sides[gi].files.end()) { prevTargetT = f->second; hadPrevTarget = true; }
             }
@@ -1083,13 +1318,13 @@ static void SyncFileItem(const SyncItem& item, bool dry,
     if (!dry) {
         bool le = false;
         ULARGE_INTEGER t = FileTimeOf(local, &le);
-        int li = GetSideIdx(*st, local);
+        int li = GetSideIdx(*st, local, VolumeSerialOf(local));
         if (le) st->sides[li].files[L""] = t; else st->sides[li].files.erase(L"");
         for (size_t ti = 0; ti < targets.size(); ti++) {
             if (!DriveExists(targets[ti])) continue;   // диска немає - стан лишається
             bool te = false;
             ULARGE_INTEGER tt = FileTimeOf(targets[ti], &te);
-            int gi = GetSideIdx(*st, targets[ti]);
+            int gi = GetSideIdx(*st, targets[ti], VolumeSerialOf(targets[ti]));
             if (te) st->sides[gi].files[L""] = tt; else st->sides[gi].files.erase(L"");
         }
     }
@@ -1103,7 +1338,7 @@ static void SyncFileItem(const SyncItem& item, bool dry,
 // (з бекапом). Якщо цей файл на Y змінився - видалення не поширюється
 // (модифікація перемагає, файл повернеться на X звичайною синхронізацією).
 // ---------------------------------------------------------------------
-static void SyncFolderPair(const SyncItem& item, bool dry,
+static void SyncFolderPair(SyncItem& item, bool dry,
                            std::vector<std::wstring>* done,
                            std::vector<std::wstring>* backups,
                            std::wstring* firstError, int* identicalCount,
@@ -1114,15 +1349,17 @@ static void SyncFolderPair(const SyncItem& item, bool dry,
     std::wstring localRoot = item.localPath;
     if (!DriveExists(localRoot)) return;   // диска локальної сторони немає - тихо
 
-    // Друга сторона: абсолютний шлях -> одна ціль; відносний -> кожна
-    // підключена флешка.
+    // Друга сторона: абсолютний шлях -> одна ціль; відносний -> лише
+    // прив'язаний том (за серійним номером), поки не прив'язано - усі.
     std::vector<std::wstring> targets;
     if (IsAbsolutePath(item.flashName))
         targets.push_back(item.flashName);
     else {
         std::vector<std::wstring> roots = GetRemovableRoots();
-        for (size_t ri = 0; ri < roots.size(); ri++)
+        for (size_t ri = 0; ri < roots.size(); ri++) {
+            if (item.vol != 0 && VolumeSerialOf(roots[ri]) != item.vol) continue;
             targets.push_back(roots[ri] + item.flashName);
+        }
     }
 
     // Знімок: попередній вміст локальної сторони (копія до циклу - після
@@ -1132,7 +1369,9 @@ static void SyncFolderPair(const SyncItem& item, bool dry,
     bool hasPrevLocal = false;
     if (!dry) {
         int i = FindSideIdx(*st, localRoot);
-        if (i >= 0) { prevLocalFiles = st->sides[i].files; hasPrevLocal = true; }
+        if (i >= 0 && SideValidForPath(st->sides[i], localRoot)) {
+            prevLocalFiles = st->sides[i].files; hasPrevLocal = true;
+        }
     }
 
     for (size_t ti = 0; ti < targets.size(); ti++) {
@@ -1143,7 +1382,9 @@ static void SyncFolderPair(const SyncItem& item, bool dry,
         bool hasPrevTarget = false;
         if (!dry) {
             int gi = FindSideIdx(*st, flashRoot);
-            if (gi >= 0) { prevTargetFiles = st->sides[gi].files; hasPrevTarget = true; }
+            if (gi >= 0 && SideValidForPath(st->sides[gi], flashRoot)) {
+                prevTargetFiles = st->sides[gi].files; hasPrevTarget = true;
+            }
         }
 
         std::vector<TreeEntry> localTree, flashTree;
@@ -1339,12 +1580,128 @@ static void SyncFolderPair(const SyncItem& item, bool dry,
             std::map<std::wstring, ULARGE_INTEGER> mA, mB;
             for (size_t i = 0; i < a2.size(); i++) mA[a2[i].rel] = a2[i].t;
             for (size_t i = 0; i < b2.size(); i++) mB[b2[i].rel] = b2[i].t;
-            int li = GetSideIdx(*st, localRoot);
+            int li = GetSideIdx(*st, localRoot, VolumeSerialOf(localRoot));
             st->sides[li].files = mA;
-            int gi = GetSideIdx(*st, flashRoot);
+            int gi = GetSideIdx(*st, flashRoot, VolumeSerialOf(flashRoot));
             st->sides[gi].files = mB;
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// БЕКАП (односторонній): джерело -> приймач. Приймач користувач
+// контролює сам: видаляє/переміщує файли, коли хоче. Ми лише копіюємо
+// те, що НОВІШЕ в джерелі (нові файли і зміни); старіше джерело
+// приймач не "відкочує". Видалення не поширюються.
+// ---------------------------------------------------------------------
+static void SyncBackupItem(SyncItem& item,
+                           std::vector<std::wstring>* done,
+                           std::wstring* firstError)
+{
+    // Джерело/приймач: ВІДНОСНІ шляхи (пара на знімному томі) розв'язуємо
+    // за серійним номером - буква диска може змінюватись від підключення
+    // до підключення. Абсолютні шляхи (фіксований диск/мережа) - як є.
+    std::wstring src = item.localPath;
+    if (item.vol != 0) {
+        std::vector<std::wstring> roots = GetRemovableRoots();
+        bool found = false;
+        for (size_t ri = 0; ri < roots.size(); ri++) {
+            if (VolumeSerialOf(roots[ri]) == item.vol) {
+                src = roots[ri] + item.localPath;
+                found = true;
+                break;
+            }
+        }
+        if (!found) return;   // джерело не підключене - тихо
+    }
+    std::wstring dst = item.flashName;
+    if (item.volDst != 0) {
+        std::vector<std::wstring> roots = GetRemovableRoots();
+        bool found = false;
+        for (size_t ri = 0; ri < roots.size(); ri++) {
+            if (VolumeSerialOf(roots[ri]) == item.volDst) {
+                dst = roots[ri] + item.flashName;
+                found = true;
+                break;
+            }
+        }
+        if (!found) return;   // приймач не підключений - тихо
+    }
+
+    if (!DriveExists(src)) return;   // диска джерела немає - тихо
+    // Приймач на знімному томі: тихий пропуск, поки накопичувач відсутній.
+    if (dst.size() >= 2 && dst[1] == L':' && !DriveExists(dst)) return;
+
+    DWORD sa = GetFileAttributesW(src.c_str());
+    if (sa == INVALID_FILE_ATTRIBUTES) return;   // джерело зникло
+
+    if (!(sa & FILE_ATTRIBUTE_DIRECTORY)) {
+        // Один файл (конфіг вручну): dst = повний шлях приймача.
+        bool de = false;
+        ULARGE_INTEGER dt = FileTimeOf(dst, &de);
+        bool se = false;
+        ULARGE_INTEGER st = FileTimeOf(src, &se);
+        if (!se) return;
+        if (de && dt.QuadPart + (long long)(TIME_TOLERANCE * 10000000.0) >= st.QuadPart)
+            return;   // приймач не старший - нічого не робимо
+        CreateParentDirs(dst);
+        if (CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
+            WriteLogB(L"бекап: " + dst);
+            done->push_back(dst);
+        } else if (firstError->empty()) {
+            *firstError = S(S_COPY_FAILED);
+        }
+        return;
+    }
+
+    std::vector<TreeEntry> tree;
+    WalkTree(src, L"", 0, tree);
+    for (size_t i = 0; i < tree.size(); i++) {
+        std::wstring s = src + L"\\" + tree[i].rel;
+        std::wstring d = dst + L"\\" + tree[i].rel;
+        bool de = false;
+        ULARGE_INTEGER dt = FileTimeOf(d, &de);
+        if (de && dt.QuadPart + (long long)(TIME_TOLERANCE * 10000000.0) >= tree[i].t.QuadPart)
+            continue;   // у приймачі не старіше - не чіпаємо
+        CreateParentDirs(d);
+        if (CopyFileW(s.c_str(), d.c_str(), FALSE)) {
+            WriteLogB(L"бекап: " + d);
+            done->push_back(d);
+        } else if (firstError->empty()) {
+            *firstError = S(S_COPY_FAILED);
+        }
+    }
+}
+
+// Годинний прохід: ТІЛЬКИ бекап-пари (синхронізація тригериться
+// флешкою/вручну, а бекап перевіряється щогодини).
+static void ShowBalloon(const std::wstring& text, bool error);   // форвард
+
+static void BackupPass()
+{
+    LoadBackupItems();
+    std::vector<std::wstring> done;
+    std::wstring firstError;
+    std::vector<DWORD> volsBefore;
+    for (size_t i = 0; i < g_backupItems.size(); i++) {
+        volsBefore.push_back(g_backupItems[i].vol);
+        volsBefore.push_back(g_backupItems[i].volDst);
+    }
+    for (size_t i = 0; i < g_backupItems.size(); i++)
+        SyncBackupItem(g_backupItems[i], &done, &firstError);
+    bool volsChanged = false;
+    for (size_t i = 0, k = 0; i < g_backupItems.size() && !volsChanged; i++, k += 2) {
+        if (g_backupItems[i].vol != volsBefore[k] ||
+            g_backupItems[i].volDst != volsBefore[k + 1]) volsChanged = true;
+    }
+    if (volsChanged) SaveBackupItems();
+    if (!done.empty()) {
+        std::wstring text = Format1(S(S_BACKUP_UPDATED),
+            std::to_wstring((long long)done.size()));
+        ShowBalloon(text, false);
+    }
+    if (!firstError.empty())
+        ShowBalloon(firstError, true);
 }
 
 // ---------------------------------------------------------------------
@@ -1370,7 +1727,14 @@ static void DoSyncOnce(bool dry, std::wstring* balloonOut, bool* isError,
         return;
     }
 
+    std::vector<DWORD> volsBefore;
+    for (size_t i = 0; i < g_items.size(); i++) volsBefore.push_back(g_items[i].vol);
     for (size_t i = 0; i < g_items.size(); i++) {
+        if (g_items[i].type == L'B') {
+            // Бекап: знімки/конфлікти не потрібні.
+            SyncBackupItem(g_items[i], &done, &firstError);
+            continue;
+        }
         PairState st;
         bool haveState = dry ? false : LoadPairState(g_items[i], st);
         if (g_items[i].type == L'F')
@@ -1381,6 +1745,11 @@ static void DoSyncOnce(bool dry, std::wstring* balloonOut, bool* isError,
                            deletedOut, conflictsOut, &st);
         if (haveState || !dry) SavePairState(g_items[i], st);
     }
+    // Автоприв'язка пар до томів - зберегти конфіг.
+    bool volsChanged = false;
+    for (size_t i = 0; i < g_items.size() && !volsChanged; i++)
+        if (g_items[i].vol != volsBefore[i]) volsChanged = true;
+    if (volsChanged) SaveItems();
 
     if (balloonOut) {
         if (!firstError.empty()) {
@@ -1737,6 +2106,97 @@ static void InstallUpdate()
 }
 
 // ---------------------------------------------------------------------
+// Питання про оновлення: власне вікно (з іконкою програми в заголовку,
+// кнопки "Так"/"Ні", поверх усіх вікон). Повертає IDYES / IDNO.
+// ---------------------------------------------------------------------
+static int g_askResult = 0;
+
+static LRESULT CALLBACK AskWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_COMMAND:
+        if (LOWORD(wp) == 1) { g_askResult = IDYES; DestroyWindow(hwnd); }
+        else if (LOWORD(wp) == 2) { g_askResult = IDNO; DestroyWindow(hwnd); }
+        return 0;
+    case WM_KEYDOWN:
+        if (wp == VK_ESCAPE) { g_askResult = IDNO; DestroyWindow(hwnd); }
+        return 0;
+    case WM_CLOSE:
+        g_askResult = IDNO;
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static int AskUpdateDialog(const std::wstring& text)
+{
+    if (g_askResult) return g_askResult;
+    WNDCLASSEXW wc = { 0 };
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = AskWndProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hIcon = LoadIconW(wc.hInstance, MAKEINTRESOURCEW(1));
+    wc.hIconSm = (HICON)LoadImageW(wc.hInstance, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                   GetSystemMetrics(SM_CXSMICON),
+                                   GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
+    wc.lpszClassName = L"ZoneSyncAskWnd";
+    RegisterClassExW(&wc);
+
+    const int bw = 110, bh = 30;
+    int textH = 96;
+    int contentH = 16 + textH + 14 + bh + 16;   // вміст клієнта
+    int contentW = 460;
+    DWORD wstyle = WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    RECT arc = { 0, 0, contentW, contentH };
+    AdjustWindowRect(&arc, wstyle, FALSE);
+    int ww = arc.right - arc.left, wh = arc.bottom - arc.top;
+    int sw = GetSystemMetrics(SM_CXSCREEN);
+    int sh = GetSystemMetrics(SM_CYSCREEN);
+    g_askResult = 0;
+    HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_DLGMODALFRAME,
+                                wc.lpszClassName, APP_TITLE,
+                                wstyle,
+                                (sw - ww) / 2, (sh - wh) / 2, ww, wh,
+                                nullptr, nullptr, wc.hInstance, nullptr);
+
+    DWORD st = WS_CHILD | WS_VISIBLE;
+    HWND txt = CreateWindowExW(0, L"STATIC", text.c_str(),
+                               st | SS_LEFT,
+                               16, 16, contentW - 32, textH, hwnd, nullptr,
+                               wc.hInstance, nullptr);
+    HWND bYes = CreateWindowExW(0, L"BUTTON", S(S_YES).c_str(),
+                                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                                contentW - 2 * bw - 30, contentH - bh - 16, bw, bh,
+                                hwnd, (HMENU)1, wc.hInstance, nullptr);
+    HWND bNo = CreateWindowExW(0, L"BUTTON", S(S_NO).c_str(),
+                               WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                               contentW - bw - 16, contentH - bh - 16, bw, bh,
+                               hwnd, (HMENU)2, wc.hInstance, nullptr);
+    NONCLIENTMETRICSW ncm = { sizeof(ncm) };
+    SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
+    HFONT f = CreateFontIndirectW(&ncm.lfMessageFont);
+    SendMessageW(txt, WM_SETFONT, (WPARAM)f, TRUE);
+    SendMessageW(bYes, WM_SETFONT, (WPARAM)f, TRUE);
+    SendMessageW(bNo, WM_SETFONT, (WPARAM)f, TRUE);
+
+    ShowWindow(hwnd, SW_SHOWNORMAL);
+    SetForegroundWindow(hwnd);
+    SetFocus(bNo);   // фокус на "Ні" - випадковий Enter не встановить
+    MSG m;
+    while (g_askResult == 0 && GetMessageW(&m, nullptr, 0, 0) > 0) {
+        if (m.message == WM_KEYDOWN && m.wParam == VK_ESCAPE) {
+            g_askResult = IDNO;
+            DestroyWindow(hwnd);
+        }
+        TranslateMessage(&m);
+        DispatchMessageW(&m);
+    }
+    return g_askResult;
+}
+
+// ---------------------------------------------------------------------
 // Захищена копія: Program Files\Zone_Sync\.
 // ---------------------------------------------------------------------
 static bool StartTarget()
@@ -1816,7 +2276,13 @@ static int EnsureInstalledCopy()
         // Немає в Program Files -> установка (адмін). При скасуванні UAC
         // продовжуємо з поточного місця.
     } else if (VerGreater(sv, tv)) {
-        // Встановлена версія старіша -> оновлення (адмін).
+        // Запущений exe новіший за встановлений -> ПИТАННЯ: оновлюватись?
+        std::wstring ask = Format1(S(S_UPDATE_ASK), APP_VERSION);
+        if (AskUpdateDialog(ask) != IDYES) {
+            // Відмова -> працює встановлена версія.
+            if (StartTarget()) return 0;
+            return 1;
+        }
     } else if (VerGreater(tv, sv) || (tv.a == sv.a && tv.b == sv.b && tv.c == sv.c && tv.d == sv.d)) {
         // Встановлена новіша або та сама версія -> запустити звідти.
         if (StartTarget()) return 0;
@@ -1938,7 +2404,7 @@ static void TrayRemove()
 // ---------------------------------------------------------------------
 enum MenuIcon {
     MI_NONE = 0, MI_SYNC, MI_AUTOSTART, MI_FILES, MI_ADDFILE, MI_ADDFOLDER,
-    MI_EDIT, MI_LOG, MI_LANG, MI_EXIT, MI_UPDATE, MI_REMOVE
+    MI_EDIT, MI_LOG, MI_LANG, MI_EXIT, MI_UPDATE, MI_REMOVE, MI_BAK
 };
 
 struct MenuDef {
@@ -1947,6 +2413,7 @@ struct MenuDef {
     std::wstring text;
     int  icon;
     bool checked;
+    bool header;             // "шапка" підменю: без підсвітки, сірий текст
 };
 static std::vector<MenuDef> g_menuDefs;
 static HFONT g_menuFont = nullptr;
@@ -1968,19 +2435,23 @@ static std::wstring MenuDefText(size_t idx)
     return d.strId >= 0 ? S((StrId)d.strId) : d.text;
 }
 
-static void AddOwnerItem(HMENU menu, UINT id, int strId, int icon, bool checked)
+static void AddOwnerItem(HMENU menu, UINT id, int strId, int icon, bool checked,
+                         bool header = false)
 {
     MenuDef d;
     d.id = id; d.strId = strId; d.icon = icon; d.checked = checked;
+    d.header = header;
     g_menuDefs.push_back(d);
     AppendMenuW(menu, MF_OWNERDRAW, (UINT_PTR)id,
                 (LPCWSTR)(UINT_PTR)(g_menuDefs.size() - 1));
 }
 
-static void AddOwnerText(HMENU menu, UINT id, const std::wstring& text, int icon)
+static void AddOwnerText(HMENU menu, UINT id, const std::wstring& text, int icon,
+                         bool header = false)
 {
     MenuDef d;
     d.id = id; d.strId = -1; d.text = text; d.icon = icon; d.checked = false;
+    d.header = header;
     g_menuDefs.push_back(d);
     AppendMenuW(menu, MF_OWNERDRAW, (UINT_PTR)id,
                 (LPCWSTR)(UINT_PTR)(g_menuDefs.size() - 1));
@@ -2085,6 +2556,19 @@ static void DrawMenuIcon(HDC hdc, int icon, int cx, int cy, bool sel)
         LineTo(hdc, cx - 4, cy + 4);
         break;
     }
+    case MI_BAK: {           // папка зі стрілкою вниз (бекап)
+        MoveToEx(hdc, cx - 7, cy + 4, nullptr);
+        LineTo(hdc, cx - 7, cy - 4); LineTo(hdc, cx - 2, cy - 4);
+        LineTo(hdc, cx, cy - 6);     LineTo(hdc, cx + 7, cy - 6);
+        LineTo(hdc, cx + 7, cy + 4); LineTo(hdc, cx - 7, cy + 4);
+        MoveToEx(hdc, cx, cy - 2, nullptr);
+        LineTo(hdc, cx, cy + 5);
+        HGDIOBJ ob2 = SelectObject(hdc, CreateSolidBrush(blue));
+        POINT tri[3] = { { cx - 4, cy + 4 }, { cx + 4, cy + 4 }, { cx, cy + 8 } };
+        Polygon(hdc, tri, 3);
+        SelectObject(hdc, ob2);
+        break;
+    }
     default: break;
     }
     DeleteObject(SelectObject(hdc, op));
@@ -2101,26 +2585,58 @@ static void BuildTrayMenu(HMENU menu)
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     }
     AddOwnerItem(menu, IDM_SYNC_NOW, S_SYNC_NOW, MI_SYNC, false);
+    AddOwnerItem(menu, IDM_SYNC_BACKUP_NOW, S_BACKUP_NOW, MI_BAK, false);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AddOwnerItem(menu, IDM_AUTOSTART, S_AUTOSTART, MI_AUTOSTART,
                  AutostartInstalled());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
+    // --- Синхронізація (власне підменю) ---
     HMENU files = CreatePopupMenu();
+    g_menuDefs.push_back(MenuDef());   // заглушка під індекс шапки
+    int syncHeaderIdx = (int)g_menuDefs.size() - 1;
+    {
+        MenuDef d; d.id = IDM_FILES; d.strId = S_FILES; d.icon = MI_FILES;
+        d.checked = false; d.header = true;
+        g_menuDefs[syncHeaderIdx] = d;
+    }
+    AppendMenuW(files, MF_OWNERDRAW, (UINT_PTR)IDM_FILES,
+                (LPCWSTR)(UINT_PTR)syncHeaderIdx);
     AddOwnerItem(files, IDM_ADD_FILE, S_ADD_FILE, MI_ADDFILE, false);
     AddOwnerItem(files, IDM_ADD_FOLDER, S_ADD_FOLDER, MI_ADDFOLDER, false);
     AddOwnerItem(files, IDM_EDIT_LIST, S_EDIT_LIST, MI_EDIT, false);
+    AddOwnerItem(files, IDM_SHOW_LOG, S_SHOW_LOG, MI_LOG, false);
     AppendMenuW(files, MF_SEPARATOR, 0, nullptr);
     for (size_t i = 0; i < g_items.size(); i++) {
         std::wstring label = g_items[i].flashName +
             (g_items[i].type == L'D' ? L" " + S(S_TYPE_FOLDER) : L"");
         AddOwnerText(files, IDM_REMOVE_BASE + (UINT)i, label, MI_REMOVE);
     }
-    AddOwnerItem(menu, IDM_FILES, S_FILES, MI_FILES, false);
     AppendMenuW(menu, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)files,
-                (LPCWSTR)(UINT_PTR)(g_menuDefs.size() - 1));
+                (LPCWSTR)(UINT_PTR)syncHeaderIdx);
 
-    AddOwnerItem(menu, IDM_SHOW_LOG, S_SHOW_LOG, MI_LOG, false);
+    // --- Бекап (окреме підменю, свій список і свій лог) ---
+    HMENU bak = CreatePopupMenu();
+    g_menuDefs.push_back(MenuDef());
+    int bakHeaderIdx = (int)g_menuDefs.size() - 1;
+    {
+        MenuDef d; d.id = 0; d.strId = S_BAK_HEADER; d.icon = MI_BAK;
+        d.checked = false; d.header = true;
+        g_menuDefs[bakHeaderIdx] = d;
+    }
+    AppendMenuW(bak, MF_OWNERDRAW, (UINT_PTR)IDM_FILES + 1,
+                (LPCWSTR)(UINT_PTR)bakHeaderIdx);
+    AddOwnerItem(bak, IDM_ADD_BACKUP, S_ADD_BACKUP, MI_BAK, false);
+    AddOwnerItem(bak, IDM_SHOW_BAK_LOG, S_SHOW_BAK_LOG, MI_LOG, false);
+    AppendMenuW(bak, MF_SEPARATOR, 0, nullptr);
+    for (size_t i = 0; i < g_backupItems.size(); i++) {
+        std::wstring label = g_backupItems[i].localPath + L"  →  " +
+            g_backupItems[i].flashName;
+        AddOwnerText(bak, IDM_BAK_REMOVE_BASE + (UINT)i, label, MI_REMOVE);
+    }
+    AppendMenuW(menu, MF_POPUP | MF_OWNERDRAW, (UINT_PTR)bak,
+                (LPCWSTR)(UINT_PTR)bakHeaderIdx);
+
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AddOwnerItem(menu, IDM_LANGUAGE, S_LANGUAGE, MI_LANG, false);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -2130,9 +2646,9 @@ static void BuildTrayMenu(HMENU menu)
 // ---------------------------------------------------------------------
 // Вибір папки (SHBrowseForFolder - shell32, без COM-ініціалізації).
 // ---------------------------------------------------------------------
-static bool PickFolder(HWND owner, std::wstring& out)
+static bool PickFolderTitled(HWND owner, const std::wstring& title,
+                             std::wstring& out)
 {
-    std::wstring title = S(S_ADD_FOLDER_TITLE);
     BROWSEINFOW bi = { 0 };
     bi.hwndOwner = owner;
     bi.ulFlags = BIF_RETURNONLYFSDIRS;
@@ -2146,14 +2662,21 @@ static bool PickFolder(HWND owner, std::wstring& out)
     return ok;
 }
 
+static bool PickFolder(HWND owner, std::wstring& out)
+{
+    std::wstring title = S(S_ADD_FOLDER_TITLE);
+    return PickFolderTitled(owner, title, out);
+}
+
 // Вибір другого розташування: БУДЬ-ЯКА папка на будь-якому диску
 // (огляд починається зі "Робочий стіл" -> "Комп'ютер").
 // Якщо вибрано знімний носій - повертаємо ВІДНОСНИЙ шлях (без диска),
 // він діє на кожній підключеній флешці. Інакше - абсолютний шлях.
 // "" = корінь знімного диска.
 static bool PickSecondSide(HWND owner, const std::wstring& itemName,
-                           std::wstring& placeOut)
+                           std::wstring& placeOut, DWORD& volOut)
 {
+    volOut = 0;
     std::wstring title = Format1(S(S_CHOOSE_FLASH_PLACE), itemName);
     BROWSEINFOW bi = { 0 };
     bi.hwndOwner = owner;
@@ -2168,11 +2691,18 @@ static bool PickSecondSide(HWND owner, const std::wstring& itemName,
 
     std::wstring p = path;
     while (!p.empty() && p[p.size() - 1] == L'\\') p = p.substr(0, p.size() - 1);
-    // Знімний носій -> зберігаємо шлях відносно кореня диска.
+    // Знімний носій -> зберігаємо шлях відносно кореня диска і
+    // ПРИВ'ЯЗУЄМО пару до фізичного тому (серійний номер), щоб інша
+    // флешка з тією ж буквою не брала участі в синхронізації.
     wchar_t drv[4] = { p[0], L':', L'\\', 0 };
-    if (GetDriveTypeW(drv) == DRIVE_REMOVABLE) {
-        if (_wcsnicmp(p.c_str(), drv, 3) == 0) p = p.substr(3);
-        while (!p.empty() && p[0] == L'\\') p = p.substr(1);
+    if (p.size() >= 2 && p[1] == L':' && GetDriveTypeW(drv) == DRIVE_REMOVABLE) {
+        volOut = VolumeSerialOf(std::wstring(1, p[0]) + L":\\");
+        if (p.size() == 2) {
+            p.clear();   // вибрано КОРІНЬ диска -> відносний шлях ""
+        } else if (_wcsnicmp(p.c_str(), drv, 3) == 0) {
+            p = p.substr(3);
+            while (!p.empty() && p[0] == L'\\') p = p.substr(1);
+        }
     }
     placeOut = p;
     return true;
@@ -2186,6 +2716,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     if (msg == WM_TRAYICON) {
         if (LOWORD(lp) == WM_CONTEXTMENU || LOWORD(lp) == WM_RBUTTONUP) {
             LoadItems();
+            LoadBackupItems();
             HMENU menu = CreatePopupMenu();
             BuildTrayMenu(menu);
             POINT pt; GetCursorPos(&pt);
@@ -2223,17 +2754,27 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         size_t idx = (size_t)di->itemData;
         bool sel = (di->itemState & ODS_SELECTED) != 0;
         bool gray = (di->itemState & (ODS_GRAYED | ODS_DISABLED)) != 0;
+        bool header = idx < g_menuDefs.size() && g_menuDefs[idx].header;
         RECT rc = di->rcItem;
-        HBRUSH b = CreateSolidBrush(sel ? RGB(0, 118, 215) : RGB(250, 250, 252));
+        HBRUSH b;
+        if (header)
+            b = CreateSolidBrush(RGB(242, 243, 246));
+        else if (sel)
+            b = CreateSolidBrush(RGB(0, 118, 215));
+        else
+            b = CreateSolidBrush(RGB(250, 250, 252));
         FillRect(di->hDC, &rc, b);
         DeleteObject(b);
         int cx = rc.left + 20;
         int cy = (rc.top + rc.bottom) / 2;
         DrawMenuIcon(di->hDC, idx < g_menuDefs.size() ? g_menuDefs[idx].icon : MI_NONE,
-                     cx, cy, sel);
+                     cx, cy, sel && !header);
         SetBkMode(di->hDC, TRANSPARENT);
-        SetTextColor(di->hDC, gray ? RGB(160, 160, 160)
-                                   : (sel ? RGB(255, 255, 255) : RGB(35, 35, 40)));
+        if (header)
+            SetTextColor(di->hDC, RGB(96, 100, 110));
+        else
+            SetTextColor(di->hDC, gray ? RGB(160, 160, 160)
+                                       : (sel ? RGB(255, 255, 255) : RGB(35, 35, 40)));
         HGDIOBJ of = SelectObject(di->hDC, MenuFont());
         std::wstring t = MenuDefText(idx);
         RECT tr = { rc.left + 40, rc.top, rc.right - 10, rc.bottom };
@@ -2252,6 +2793,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (!text.empty()) ShowBalloon(text, err);
             std::wstring t = SideReportText(deleted, conflicts);
             if (!t.empty()) ShowDeletionsWindow(t);
+        } else if (id == IDM_SYNC_BACKUP_NOW) {
+            LoadBackupItems();
+            if (g_backupItems.empty())
+                ShowBalloon(S(S_NO_BACKUPS), true);
+            else
+                BackupPass();
         } else if (id == IDM_AUTOSTART) {
             bool installed = AutostartInstalled();
             if (!installed) {
@@ -2294,10 +2841,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 }
                 // Друге розташування: будь-яка папка (флешка або диск).
                 // Скасовано - нічого не додаємо.
-                std::wstring place;
-                if (!PickSecondSide(hwnd, leaf, place)) return 0;
+                std::wstring place; DWORD vol = 0;
+                if (!PickSecondSide(hwnd, leaf, place, vol)) return 0;
                 std::wstring sideB = place.empty() ? leaf : place + L"\\" + leaf;
-                AddItemToList(L'F', localPath, sideB);
+                AddItemToList(L'F', localPath, sideB, vol);
                 WriteLog(S(S_ADDED) + L": " + localPath + L"  →  " + sideB);
                 ShowBalloon(S(S_ADDED) + L": " + sideB, false);
             }
@@ -2314,12 +2861,70 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             // Друге розташування: будь-яка папка (флешка або диск).
             // Скасовано - нічого не додаємо.
-            std::wstring place;
-            if (!PickSecondSide(hwnd, leaf, place)) return 0;
+            std::wstring place; DWORD vol = 0;
+            if (!PickSecondSide(hwnd, leaf, place, vol)) return 0;
             std::wstring sideB = place.empty() ? leaf : place + L"\\" + leaf;
-            AddItemToList(L'D', localPath, sideB);
+            AddItemToList(L'D', localPath, sideB, vol);
             WriteLog(S(S_ADDED) + L": [папка] " + localPath + L"  →  " + sideB);
             ShowBalloon(S(S_ADDED) + L": " + sideB, false);
+        } else if (id == IDM_ADD_BACKUP) {
+            // Бекап: ПАПКА-джерело -> місце приймача (диск/мережа).
+            std::wstring src;
+            if (!PickFolderTitled(hwnd, S(S_BACKUP_SRC_TITLE), src)) return 0;
+            std::wstring leaf = src;
+            size_t slash = leaf.find_last_of(L'\\');
+            if (slash != std::wstring::npos) leaf = leaf.substr(slash + 1);
+            if (leaf.empty()) return 0;
+            if (BackupInList(src)) {
+                ShowBalloon(S(S_ALREADY_IN_LIST), true);
+                return 0;
+            }
+            // Приймач: люба папка (локальний диск або \\мережа).
+            std::wstring dst;
+            if (!PickFolderTitled(hwnd, S(S_BACKUP_DST_TITLE), dst)) return 0;
+            if (dst.empty()) return 0;
+            if (dst.size() > 3 && dst[dst.size() - 1] == L'\\') dst.erase(dst.size() - 1);
+            SyncItem it; it.type = L'B'; it.localPath = src; it.flashName = dst;
+            it.vol = 0; it.volDst = 0;
+            // Джерело/приймач на знімному томі -> ВІДНОСНИЙ шлях + серійник
+            // (буква диска може змінюватись, пара слідує за ФІЗИЧНИМ томом).
+            wchar_t sroot[4] = { src[0], L':', L'\\', 0 };
+            if (src.size() >= 2 && src[1] == L':' &&
+                GetDriveTypeW(sroot) == DRIVE_REMOVABLE) {
+                it.vol = VolumeSerialOf(src);
+                it.localPath = (src.size() > 3) ? src.substr(3) : L"";
+                while (!it.localPath.empty() && it.localPath[0] == L'\\')
+                    it.localPath.erase(0, 1);
+            }
+            wchar_t droot[4] = { dst[0], L':', L'\\', 0 };
+            if (dst.size() >= 2 && dst[1] == L':' &&
+                GetDriveTypeW(droot) == DRIVE_REMOVABLE) {
+                it.volDst = VolumeSerialOf(dst);
+                it.flashName = (dst.size() > 3) ? dst.substr(3) : L"";
+                while (!it.flashName.empty() && it.flashName[0] == L'\\')
+                    it.flashName.erase(0, 1);
+            }
+            g_backupItems.push_back(it);
+            SaveBackupItems();
+            WriteLogB(S(S_ADDED) + L": [бекап] " + src + L"  →  " + dst);
+            ShowBalloon(S(S_ADDED) + L": " + dst, false);
+        } else if (id == IDM_SHOW_BAK_LOG) {
+            if (GetFileAttributesW(g_bakLogPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+                ShellExecuteW(hwnd, L"open", L"notepad.exe",
+                              g_bakLogPath.c_str(), nullptr, SW_SHOWNORMAL);
+        } else if (id >= IDM_BAK_REMOVE_BASE && id < IDM_BAK_REMOVE_BASE + 1000) {
+            UINT idx = id - IDM_BAK_REMOVE_BASE;
+            if (idx < g_backupItems.size()) {
+                SyncItem bit = g_backupItems[idx];
+                std::wstring label = bit.localPath + L"  →  " + bit.flashName;
+                std::wstring msg = Format1(S(S_REMOVE_CONFIRM), label);
+                if (MessageBoxW(hwnd, msg.c_str(), S(S_REMOVE_FILE_TITLE).c_str(),
+                                MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                    RemoveBackupFromList(bit.localPath);
+                    WriteLogB(S(S_REMOVED) + L": " + label);
+                    ShowBalloon(S(S_REMOVED) + L": " + label, false);
+                }
+            }
         } else if (id == IDM_EDIT_LIST) {
             std::wstring hint = Format1(S(S_EDIT_LIST_HINT), g_configPath);
             MessageBoxW(hwnd, hint.c_str(), APP_TITLE, MB_OK | MB_ICONINFORMATION);
@@ -2389,6 +2994,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 SetTimer(hwnd, TIMER_ID, 1500, nullptr);   // debounce -> sync
             }
         }
+        else if (wp == TIMER_ID + 3) {
+            // Бекап: перевірка джерел щогодини.
+            BackupPass();
+        }
         else if (wp == TIMER_ID + 1) {
             // Щоденний тик: перевірка оновлень + чистка бекапів старших доби.
             StartUpdateCheck();
@@ -2399,9 +3008,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
 
     case WM_APP + 3: {
-        // Фон-потік повідомив про доступне оновлення.
+        // Фон-потік повідомив про доступне оновлення: балун + ПИТАННЯ
+        // користувачеві. Відмова -> пункт меню лишається до його рішення.
         std::wstring msg = Format1(S(S_UPDATE_AVAILABLE), g_updateVersion);
         ShowBalloon(msg, false);
+        std::wstring ask = Format1(S(S_UPDATE_ASK), g_updateVersion);
+        if (AskUpdateDialog(ask) == IDYES)
+            InstallUpdate();
         return 0;
     }
 
@@ -2409,6 +3022,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         KillTimer(hwnd, TIMER_ID);
         KillTimer(hwnd, TIMER_ID + 1);
         KillTimer(hwnd, TIMER_ID + 2);
+        KillTimer(hwnd, TIMER_ID + 3);
         TrayRemove();
         CoUninitialize();
         PostQuitMessage(0);
@@ -2505,6 +3119,8 @@ static int RunTray(HINSTANCE hInst)
     SetTimer(g_hwnd, TIMER_ID + 2, 2000, nullptr);
     // Перевірка оновлень (раз на добу, фон-потік).
     SetTimer(g_hwnd, TIMER_ID + 1, 4000, nullptr);
+    // Бекап: щогодини.
+    SetTimer(g_hwnd, TIMER_ID + 3, 60ULL * 60ULL * 1000ULL, nullptr);
 
     MSG msg;
     for (;;) {
