@@ -24,7 +24,7 @@
 #include <map>
 #include <algorithm>
 
-static const wchar_t* APP_VERSION = L"1.0.7.0";
+static const wchar_t* APP_VERSION = L"1.0.7.1";
 
 // ---------------------------------------------------------------------
 // Константи.
@@ -2382,11 +2382,19 @@ static void TrayAdd()
     ni.uCallbackMessage = WM_TRAYICON;
     ni.hIcon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1));
     lstrcpynW(ni.szTip, APP_TITLE, 128);
-    Shell_NotifyIconW(NIM_ADD, &ni);
-    ni.uVersion = 4;
-    Shell_NotifyIconW(NIM_SETVERSION, &ni);
-    g_trayAdded = true;
+    bool ok = Shell_NotifyIconW(NIM_ADD, &ni) != 0;
+    if (ok) {
+        ni.uVersion = 4;
+        Shell_NotifyIconW(NIM_SETVERSION, &ni);
+    }
+    // NIM_ADD падає, якщо панель задач ще не створена (автозапуск на вході,
+    // перезапуск explorer) - іконки немає, хоч процес живий.
+    g_trayAdded = ok;
 }
+
+// Повідомлення, яке explorer шилить усім вікнам при (пере)створенні
+// панелі задач: чіпляємо іконку наново.
+static UINT g_msgTaskbarCreated = 0;
 
 static void TrayRemove()
 {
@@ -2713,6 +2721,12 @@ static bool PickSecondSide(HWND owner, const std::wstring& itemName,
 // ---------------------------------------------------------------------
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (g_msgTaskbarCreated != 0 && msg == g_msgTaskbarCreated) {
+        // Панель задач (пере)створена: іконку треба перевісити.
+        TrayRemove();
+        TrayAdd();
+        return 0;
+    }
     if (msg == WM_TRAYICON) {
         if (LOWORD(lp) == WM_CONTEXTMENU || LOWORD(lp) == WM_RBUTTONUP) {
             LoadItems();
@@ -2998,6 +3012,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             // Бекап: перевірка джерел щогодини.
             BackupPass();
         }
+        else if (wp == TIMER_ID + 4) {
+            // Ретрай висячої іконки: автозапуск міг стартувати до панелі задач.
+            if (g_trayAdded)
+                KillTimer(hwnd, TIMER_ID + 4);
+            else
+                TrayAdd();
+        }
         else if (wp == TIMER_ID + 1) {
             // Щоденний тик: перевірка оновлень + чистка бекапів старших доби.
             StartUpdateCheck();
@@ -3023,6 +3044,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         KillTimer(hwnd, TIMER_ID + 1);
         KillTimer(hwnd, TIMER_ID + 2);
         KillTimer(hwnd, TIMER_ID + 3);
+        KillTimer(hwnd, TIMER_ID + 4);
         TrayRemove();
         CoUninitialize();
         PostQuitMessage(0);
@@ -3105,11 +3127,16 @@ static int RunTray(HINSTANCE hInst)
     wc.lpszClassName = L"ZoneSyncTrayWnd";
     RegisterClassW(&wc);
 
+    g_msgTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+
     g_hwnd = CreateWindowExW(0, wc.lpszClassName, APP_TITLE,
                              WS_POPUP, 0, 0, 0, 0,
                              nullptr, nullptr, hInst, nullptr);
 
     TrayAdd();
+    // Якщо панелі задач ще немає - ретрай кожні 2 с, поки не чіпиться.
+    if (!g_trayAdded)
+        SetTimer(g_hwnd, TIMER_ID + 4, 2000, nullptr);
     // URLDownloadToFile (urlmon) працює коректно з COM-ініціалізацією.
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
