@@ -24,7 +24,7 @@
 #include <map>
 #include <algorithm>
 
-static const wchar_t* APP_VERSION = L"1.0.7.1";
+static const wchar_t* APP_VERSION = L"1.0.7.2";
 
 // ---------------------------------------------------------------------
 // Константи.
@@ -2057,13 +2057,28 @@ static DWORD WINAPI UpdateCheckThread(LPVOID)
         WriteLog(L"Оновлення: не вдалося завантажити exe");
         return 0;
     }
-    // Мінімальна перевірка цілісності: не порожній файл.
+    // Мінімальна перевірка цілісності: не порожний файл.
     HANDLE f2 = CreateFileW(exeFile.c_str(), GENERIC_READ, FILE_SHARE_READ,
                             nullptr, OPEN_EXISTING, 0, nullptr);
     if (f2 == INVALID_HANDLE_VALUE) return 0;
     DWORD hi2 = 0; DWORD lo2 = GetFileSize(f2, &hi2);
     CloseHandle(f2);
     if (lo2 < 10000) { DeleteFileW(exeFile.c_str()); return 0; }
+
+    // ПЕРЕВІРКА ВІДПОВІДНОСТІ ВЕРСІЇ: мережеві кеші (проксі/CDN) можуть
+    // віддати СТАРИЙ exe під свіжим version.txt. Ставимо тільки той exe,
+    // версія якого справді дорівнює online.
+    Ver4 dv = FileVersionOf(exeFile);
+    if (dv.a != ParseVer4(online).a || dv.b != ParseVer4(online).b ||
+        dv.c != ParseVer4(online).c || dv.d != ParseVer4(online).d) {
+        WriteLog(L"Оновлення: завантажено exe " + std::to_wstring((long long)dv.a) +
+                 L"." + std::to_wstring((long long)dv.b) + L"." +
+                 std::to_wstring((long long)dv.c) + L"." +
+                 std::to_wstring((long long)dv.d) +
+                 L" замість " + online + L" (мережевий кеш) - відхилено");
+        DeleteFileW(exeFile.c_str());
+        return 0;
+    }
 
     g_updateVersion = online;
     g_updateExePath = exeFile;
@@ -2085,6 +2100,16 @@ static void InstallUpdate()
 {
     if (g_updateExePath.empty() ||
         GetFileAttributesW(g_updateExePath.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+    // Останній рубіж: exe в кеші має дорівнювати запропонованій версії.
+    Ver4 dv = FileVersionOf(g_updateExePath);
+    Ver4 ov = ParseVer4(g_updateVersion);
+    if (dv.a != ov.a || dv.b != ov.b || dv.c != ov.c || dv.d != ov.d) {
+        WriteLog(L"Оновлення: у кеші exe іншої версії - установку скасовано");
+        g_updateVersion.clear();
+        g_updateExePath.clear();
+        ShowBalloon(S(S_UPDATE_FAIL), true);
+        return;
+    }
     wchar_t exe[MAX_PATH];
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
     std::wstring params = std::wstring(
@@ -2243,6 +2268,18 @@ static int RunInstallCopy()
 {
     wchar_t self[MAX_PATH];
     GetModuleFileNameW(nullptr, self, MAX_PATH);
+    // ЗАХИСТ ВІД ДЕГРАДАЦІЇ: не перезаписуємо НОВІШУ встановлену версію
+    // старішою (наприклад, якщо хтось запустив старий exe або збій читання
+    // версії змусив подумати, що Program Files порожній).
+    Ver4 tv = FileVersionOf(g_installPath);
+    Ver4 sv = ParseVer4(APP_VERSION);
+    if (tv.a != 0 || tv.b != 0) {
+        if (VerGreater(tv, sv)) {
+            WriteLog(L"Установку скасовано: встановлена версія новіша за запущену");
+            if (StartTarget()) return 0;
+            return 1;
+        }
+    }
     size_t slash = g_installPath.find_last_of(L'\\');
     if (slash != std::wstring::npos)
         CreateDirectoryW(g_installPath.substr(0, slash).c_str(), nullptr);
